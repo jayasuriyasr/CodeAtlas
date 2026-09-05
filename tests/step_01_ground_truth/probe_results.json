@@ -1,0 +1,140 @@
+{
+  "break_even": {
+    "name": "break_even",
+    "question": "Does the chosen model's input rate clear \u00a75.4's ~$0.94/Mtok break-even at the 21,200-token ceiling?",
+    "statements": [
+      "break_even = $0.02 / 21,200 tok = $0.9434 per 1M input tokens"
+    ],
+    "observations": [
+      "AVAILABLE (ceiling): 21,200 tokens",
+      "break-even input rate: $0.9434 / Mtok",
+      "LLM_MODEL: claude-haiku-4-5",
+      "EMBED_MODEL: voyage-code-2",
+      "EMBED_DIM: 1536",
+      "configured input rate: 1.0",
+      "configured output rate: 5.0",
+      "clears break-even at the ceiling: False"
+    ],
+    "verdict": "claude-haiku-4-5 at $1.0/Mtok exceeds the break-even at the ceiling; a \u00a75.4 lever is recorded in docs/decisions/0002 and p50 packed tokens decides actual cost"
+  },
+  "environment": {
+    "name": "environment",
+    "question": "Which Neo4j build are the probes above actually describing?",
+    "statements": [
+      "CALL dbms.components() YIELD name, versions, edition"
+    ],
+    "observations": [
+      "name: Neo4j Kernel",
+      "version: 5.26.0",
+      "edition: community",
+      "throwaway-db mode: scoped-wipe",
+      "test database: neo4j",
+      "multi-database available: False"
+    ],
+    "verdict": "Neo4j Kernel 5.26.0 community; per-module isolation via scoped-wipe"
+  },
+  "probe_count_subquery": {
+    "name": "probe_count_subquery",
+    "question": "Is `COUNT { (n)--() }` available on this minor?",
+    "statements": [
+      "MATCH (n:Symbol {uid: 'probe_a'}) RETURN COUNT { (n)--() } AS degree",
+      "MATCH (s:Symbol)\nWHERE s.repo_id = 'probe'\nSET s.degree = COUNT { (s)--() }\nRETURN s.uid AS uid, s.degree AS degree ORDER BY uid"
+    ],
+    "observations": [
+      "RETURN COUNT { (n)--() }: 1",
+      "SET degree on probe_a: 1",
+      "SET degree on probe_b: 1"
+    ],
+    "verdict": "SUPPORTED \u2014 legal in a projection and on the right of SET"
+  },
+  "probe_dynamic_map_key": {
+    "name": "probe_dynamic_map_key",
+    "question": "Does `$edge_weights[rel]` resolve a dynamic key on a map parameter?",
+    "statements": [
+      "WITH $rel AS rel\nRETURN $edge_weights[rel] AS direct,\n       coalesce($edge_weights[rel], $default) AS with_default"
+    ],
+    "observations": [
+      "rel='CALLS' -> direct: 1.0",
+      "rel='CALLS' -> with_default: 1.0",
+      "rel='NO_SUCH_REL' -> direct: None",
+      "rel='NO_SUCH_REL' -> with_default: 0.5"
+    ],
+    "verdict": "SUPPORTED \u2014 dynamic key resolves; a missing key yields null and coalesce covers it"
+  },
+  "probe_exists_subquery": {
+    "name": "probe_exists_subquery",
+    "question": "Is `NOT EXISTS { MATCH (c:Symbol {uid: $u}) }` available?",
+    "statements": [
+      "MATCH (s:Symbol {uid: 'probe_a'})\nWHERE NOT EXISTS { MATCH (c:Symbol {uid: $u}) }\nRETURN s.uid AS uid"
+    ],
+    "observations": [
+      "target uid free -> rows: ['probe_a']",
+      "target uid taken -> rows: []"
+    ],
+    "verdict": "SUPPORTED \u2014 predicate admits the free case and rejects the collision"
+  },
+  "probe_merge_multitype": {
+    "name": "probe_merge_multitype",
+    "question": "Confirm `MERGE (a)-[:A|B]->(b)` is rejected \u2014 the per-type split in \u00a711.2 3b is required, not defensive.",
+    "statements": [
+      "MATCH (a:Symbol {uid: 'probe_a'}), (b:Symbol {uid: 'probe_b'})\nMERGE (a)-[r:CALLS|IMPORTS]->(b)\nRETURN type(r) AS t",
+      "MATCH (a:Symbol {uid: 'probe_a'})-[r:CALLS|IMPORTS]->(b:Symbol)\nRETURN type(r) AS t"
+    ],
+    "observations": [
+      "MERGE multi-type: CypherSyntaxError: {code: Neo.ClientError.Statement.SyntaxError} {message: A single relationship type must be specified for MERGE (line 2, column 10 (offset: 72))\n\"MERGE (a)-[r:CALLS|IMPORTS]->(b)\"\n          ^}",
+      "MATCH multi-type: ['CALLS']"
+    ],
+    "verdict": "REJECTED as expected \u2014 per-type MERGE is required"
+  },
+  "probe_tsx_grammar": {
+    "name": "probe_tsx_grammar",
+    "question": "Does `tree-sitter-typescript` (tsx) emit the node types the chunker assumes for a real Next.js route + component?",
+    "statements": [
+      "Language(tree_sitter_typescript.language_tsx())\nparse(fixtures\\repos\\nextjs_min\\app\\api\\users\\route.ts)\nparse(fixtures\\repos\\nextjs_min\\components\\UserCard.tsx)"
+    ],
+    "observations": [
+      "route.ts root type: program",
+      "route.ts parse errors: none",
+      "UserCard.tsx root type: program",
+      "UserCard.tsx parse errors: none",
+      "distinct named node types: 76",
+      "node types emitted: accessibility_modifier, arguments, array, array_pattern, array_type, arrow_function, as_expression, assignment_expression, await_expression, binary_expression, call_expression, class_body, class_declaration, class_heritage, comment, export_statement, expression_statement, extends_clause, false, formal_parameters, function_declaration, function_signature, function_type, generic_type, identifier, if_statement, import_clause, import_specifier, import_statement, interface_body, interface_declaration, jsx_attribute, jsx_closing_element, jsx_element, jsx_expression, jsx_opening_element, jsx_self_closing_element, jsx_text, lexical_declaration, literal_type, member_expression, method_definition, named_imports, null, number, object, object_assignment_pattern, object_pattern, object_type, optional_parameter, pair, parenthesized_expression, predefined_type, program, property_identifier, property_signature, required_parameter, rest_pattern, return_statement, shorthand_property_identifier, shorthand_property_identifier_pattern, statement_block, string, string_fragment, super, template_string, template_substitution, ternary_expression, this, true, type_annotation, type_arguments, type_identifier, unary_expression, union_type, variable_declarator",
+      "overload declarations of `parse`: [('function_signature', 28, 'parse'), ('function_signature', 29, 'parse'), ('function_declaration', 30, 'parse')]",
+      "first named node of UserCard.tsx: expression_statement: \"'use client';\""
+    ],
+    "verdict": "ALL ASSUMED NODE TYPES PRESENT"
+  },
+  "probe_vector_ddl": {
+    "name": "probe_vector_ddl",
+    "question": "Does the vector index take `ON (s.code_vec)` or `ON s.code_vec`?",
+    "statements": [
+      "CREATE VECTOR INDEX probe_vec_parens IF NOT EXISTS\n  FOR (s:Symbol) ON (s.code_vec)\n  OPTIONS { indexConfig: { `vector.dimensions`: 1536, `vector.similarity_function`: 'cosine' } }",
+      "CREATE VECTOR INDEX probe_vec_bare IF NOT EXISTS\n  FOR (s:Symbol) ON s.code_vec\n  OPTIONS { indexConfig: { `vector.dimensions`: 1536, `vector.similarity_function`: 'cosine' } }",
+      "MATCH (s:Symbol {uid: 'probe_a'}) SET s.code_vec = $vec RETURN size(s.code_vec) AS n",
+      "CALL db.index.vector.queryNodes('probe_vec_parens', 1, $vec) YIELD node, score RETURN node.uid AS uid, score"
+    ],
+    "observations": [
+      "ON (s.code_vec): accepted",
+      "ON s.code_vec: accepted",
+      "SHOW INDEXES probe_vec_parens: type=VECTOR labels=['Symbol'] properties=['code_vec'] indexConfig={'vector.hnsw.m': 16, 'vector.hnsw.ef_construction': 100, 'vector.dimensions': 1536, 'vector.similarity_function': 'COSINE', 'vector.quantization.enabled': True}",
+      "SET s.code_vec -> size(): 1536",
+      "queryNodes rows: [('probe_a', 1.0)]"
+    ],
+    "verdict": "accepted form(s): ON (s.code_vec), ON s.code_vec"
+  },
+  "schema_apply": {
+    "name": "schema_apply",
+    "question": "Does spec \u00a711.3 apply end to end on a fresh database, and is it idempotent on a second run?",
+    "statements": [],
+    "observations": [
+      "statements applied: 8",
+      "constraints created: ['file_key', 'symbol_uid']",
+      "indexes created: ['symbol_code_vec', 'symbol_lines', 'symbol_name', 'symbol_origin', 'symbol_repo_path', 'symbol_search']",
+      "other catalogue entries: ['index_343aff4e', 'index_f7700477']",
+      "catalogue identical after second apply: True",
+      "symbol_code_vec indexConfig: {'vector.hnsw.m': 16, 'vector.hnsw.ef_construction': 100, 'vector.dimensions': 1536, 'vector.similarity_function': 'COSINE', 'vector.quantization.enabled': True}",
+      "symbol_search indexConfig: {'fulltext.analyzer': 'standard-no-stop-words', 'fulltext.eventually_consistent': False}"
+    ],
+    "verdict": "APPLIES CLEAN AND IS IDEMPOTENT"
+  }
+}
