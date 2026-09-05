@@ -1,0 +1,317 @@
+{
+  "corpus": {
+    "python": "tests/fixtures/repos/django_min",
+    "typescript": "tests/fixtures/repos/nextjs_min"
+  },
+  "stage": "packed",
+  "note": "§8.1's golden set: 45 questions, 15 per router class. Gold is named by (rel_path, qualified_name) and resolved to UIDs at run time — a UID is a truncated sha1 over repo_id and is unreviewable in a diff. Recall is measured against PACKED context, not retrieved candidates: §8.1 is explicit that 'a gold node retrieved and then dropped by the packer never reached the model'. Each question carries a reference answer split into sentences, with `claims` marking which of them §6.1 counts as claim sentences — that is what makes the T2 classifier's precision and recall measurable rather than assumed.",
+  "composition": {
+    "STRUCTURAL": "≥4 on hub-adjacent symbols, exercising the degree cutoff",
+    "SEMANTIC": "≥5 on undocumented or poorly-named symbols (§12.5)",
+    "TRACE": "8 Python, 7 TS/TSX — ≥3 TS on App Router GET/POST handlers"
+  },
+  "questions": [
+    {
+      "id": "S01", "class": "STRUCTURAL", "query": "what calls audit_event",
+      "hub_adjacent": true,
+      "gold": [["common/utils.py", "common.utils.audit_event"]],
+      "reference": ["`audit_event` is called from the auth views, the auth services and the billing views.", "It emits one structured log line per call."],
+      "claims": [true, true]
+    },
+    {
+      "id": "S02", "class": "STRUCTURAL", "query": "who calls charge_card",
+      "hub_adjacent": true,
+      "gold": [["billing/tasks.py", "billing.tasks.charge_card"], ["billing/views.py", "billing.views.SubscriptionView.post"]],
+      "reference": ["`SubscriptionView.post` calls `charge_card` [C1].", "`run_monthly_billing` also calls it for each active subscription [C2]."],
+      "claims": [true, true]
+    },
+    {
+      "id": "S03", "class": "STRUCTURAL", "query": "callers of constant_time_equals",
+      "hub_adjacent": true,
+      "gold": [["common/utils.py", "common.utils.constant_time_equals"]],
+      "reference": ["`verify_credentials` is the only caller of `constant_time_equals`."],
+      "claims": [true]
+    },
+    {
+      "id": "S04", "class": "STRUCTURAL", "query": "where is chunked used",
+      "hub_adjacent": true,
+      "gold": [["common/utils.py", "common.utils.chunked"]],
+      "reference": ["`run_monthly_billing` uses `chunked` to batch active subscriptions."],
+      "claims": [true]
+    },
+    {
+      "id": "S05", "class": "STRUCTURAL", "query": "what does LoginView.post call",
+      "gold": [["authx/views.py", "authx.views.LoginView.post"]],
+      "reference": ["`LoginView.post` calls `verify_credentials`, `issue_token` and `audit_event`."],
+      "claims": [true]
+    },
+    {
+      "id": "S06", "class": "STRUCTURAL", "query": "where is issue_token defined",
+      "gold": [["authx/services.py", "authx.services.issue_token"]],
+      "reference": ["`issue_token` is defined in `authx.services`."],
+      "claims": [true]
+    },
+    {
+      "id": "S07", "class": "STRUCTURAL", "query": "subclasses of TimestampMixin",
+      "hub_adjacent": true,
+      "gold": [["common/mixins.py", "common.mixins.TimestampMixin"]],
+      "reference": ["`User`, `ApiToken`, `Plan` and `Subscription` all extend `TimestampMixin`."],
+      "claims": [true]
+    },
+    {
+      "id": "S08", "class": "STRUCTURAL", "query": "what imports common.utils",
+      "gold": [["common/utils.py", "common.utils"]],
+      "reference": ["The auth views, auth services, billing views and billing tasks all import `common.utils`."],
+      "claims": [true]
+    },
+    {
+      "id": "S09", "class": "STRUCTURAL", "query": "which view handles the login route",
+      "gold": [["authx/urls.py", "authx.urls"], ["authx/views.py", "authx.views.LoginView"]],
+      "reference": ["The `login` route dispatches to `LoginView`."],
+      "claims": [true]
+    },
+    {
+      "id": "S10", "class": "STRUCTURAL", "query": "usages of ApiToken",
+      "gold": [["authx/models.py", "authx.models.ApiToken"]],
+      "reference": ["`ApiToken` is used by `issue_token`, `revoke_all` and `TokenRevokeView.delete`."],
+      "claims": [true]
+    },
+    {
+      "id": "S11", "class": "STRUCTURAL", "query": "what calls mask_email",
+      "gold": [["common/utils.py", "common.utils.mask_email"]],
+      "reference": ["`LoginView.post` calls `mask_email` when a login fails."],
+      "claims": [true]
+    },
+    {
+      "id": "S12", "class": "STRUCTURAL", "query": "where is Subscription defined",
+      "gold": [["billing/models.py", "billing.models.Subscription"]],
+      "reference": ["`Subscription` is defined in `billing.models`."],
+      "claims": [true]
+    },
+    {
+      "id": "S13", "class": "STRUCTURAL", "query": "what does run_monthly_billing call",
+      "gold": [["billing/tasks.py", "billing.tasks.run_monthly_billing"]],
+      "reference": ["`run_monthly_billing` calls `chunked` and `charge_card`."],
+      "claims": [true]
+    },
+    {
+      "id": "S14", "class": "STRUCTURAL", "query": "callers of soft_delete",
+      "gold": [["common/mixins.py", "common.mixins.SoftDeleteMixin.soft_delete"]],
+      "reference": ["`Subscription.cancel` calls `soft_delete`."],
+      "claims": [true]
+    },
+    {
+      "id": "S15", "class": "STRUCTURAL", "query": "what calls revoke",
+      "gold": [["authx/models.py", "authx.models.ApiToken.revoke"]],
+      "reference": ["`revoke_all` and `TokenRevokeView.delete` both call `revoke`."],
+      "claims": [true]
+    },
+
+    {
+      "id": "M01", "class": "SEMANTIC", "query": "how are API tokens issued",
+      "gold": [["authx/services.py", "authx.services.issue_token"]],
+      "reference": ["Tokens are minted by `issue_token`, which generates a hex secret and stores it [C1].", "An audit event is emitted for every issued token [C1]."],
+      "claims": [true, true]
+    },
+    {
+      "id": "M02", "class": "SEMANTIC", "query": "how does login work",
+      "gold": [["authx/views.py", "authx.views.LoginView.post"], ["authx/services.py", "authx.services.verify_credentials"]],
+      "reference": ["`LoginView.post` validates the payload and then calls `verify_credentials` [C1].", "On success it issues a token and returns 201 [C1].", "Which client consumes that token?"],
+      "claims": [true, true, false]
+    },
+    {
+      "id": "M03", "class": "SEMANTIC", "query": "what charges a customer card",
+      "gold": [["billing/tasks.py", "billing.tasks.charge_card"]],
+      "reference": ["`charge_card` performs the charge and returns whether it succeeded [C1].", "It returns early for non-positive amounts [C1]."],
+      "claims": [true, true]
+    },
+    {
+      "id": "M04", "class": "SEMANTIC", "query": "how are emails masked in logs",
+      "gold": [["common/utils.py", "common.utils.mask_email"]],
+      "reference": ["`mask_email` reduces an address to its first character plus the domain [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M05", "class": "SEMANTIC", "query": "how does monthly billing run",
+      "gold": [["billing/tasks.py", "billing.tasks.run_monthly_billing"]],
+      "reference": ["`run_monthly_billing` batches active subscriptions and charges each one [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M06", "class": "SEMANTIC", "query": "how is a subscription total computed",
+      "undocumented": true,
+      "gold": [["billing/models.py", "billing.models.Subscription.monthly_total"]],
+      "reference": ["`monthly_total` returns the plan price when the subscription is active, and zero otherwise [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M07", "class": "SEMANTIC", "query": "how does soft deletion work",
+      "undocumented": true,
+      "gold": [["common/mixins.py", "common.mixins.SoftDeleteMixin.soft_delete"]],
+      "reference": ["`soft_delete` stamps `deleted_at` rather than removing the row [C1].", "`is_deleted` reports the result [C1]."],
+      "claims": [true, true]
+    },
+    {
+      "id": "M08", "class": "SEMANTIC", "query": "how is the database url configured",
+      "gold": [["config/settings.py", "config.settings.database_url"]],
+      "reference": ["`database_url` reads `DATABASE_URL` and falls back to a local sqlite file [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M09", "class": "SEMANTIC", "query": "how are passwords compared safely",
+      "gold": [["common/utils.py", "common.utils.constant_time_equals"]],
+      "reference": ["`constant_time_equals` wraps `hmac.compare_digest` so comparison time does not leak length [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M10", "class": "SEMANTIC", "query": "what does the token revoke endpoint do",
+      "undocumented": true,
+      "gold": [["authx/views.py", "authx.views.TokenRevokeView.delete"]],
+      "reference": ["`TokenRevokeView.delete` looks the token up for the current user and revokes it [C1].", "It returns 404 when no such token exists [C1]."],
+      "claims": [true, true]
+    },
+    {
+      "id": "M11", "class": "SEMANTIC", "query": "how are created and updated times tracked",
+      "gold": [["common/mixins.py", "common.mixins.TimestampMixin"]],
+      "reference": ["`TimestampMixin` adds `created_at` and `updated_at` columns to any model that extends it [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M12", "class": "SEMANTIC", "query": "how is a display name chosen for a user",
+      "gold": [["authx/models.py", "authx.models.User.display_name"]],
+      "reference": ["`display_name` prefers the full name and falls back to the local part of the email [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M13", "class": "SEMANTIC", "query": "how is a list split into batches",
+      "undocumented": true,
+      "gold": [["common/utils.py", "common.utils.chunked"]],
+      "reference": ["`chunked` yields successive slices of at most the requested size [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "M14", "class": "SEMANTIC", "query": "what happens to clock skew on windows",
+      "undocumented": true,
+      "gold": [["authx/services.py", "authx.services.clock_skew_seconds"]],
+      "reference": ["`clock_skew_seconds` is defined twice under a platform guard, and returns zero on Windows [C1].", "It might behave differently on other platforms."],
+      "claims": [true, false]
+    },
+    {
+      "id": "M15", "class": "SEMANTIC", "query": "how are all of a user's tokens revoked at once",
+      "undocumented": true,
+      "gold": [["authx/services.py", "authx.services.revoke_all"]],
+      "reference": ["`revoke_all` iterates the user's active tokens and revokes each one [C1].", "It returns the number revoked [C1]."],
+      "claims": [true, true]
+    },
+
+    {
+      "id": "T01", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/authx/views.py\", line 40, in post\n    user = verify_credentials(email, password)\nAttributeError: 'NoneType' object has no attribute 'password'",
+      "gold": [["authx/views.py", "authx.views.LoginView.post"]],
+      "reference": ["The failure is in `LoginView.post`, which calls `verify_credentials` [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T02", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/authx/services.py\", line 15, in verify_credentials\n    if not constant_time_equals(user.password, password):\nAttributeError: 'NoneType' object has no attribute 'password'",
+      "gold": [["authx/services.py", "authx.services.verify_credentials"]],
+      "reference": ["`verify_credentials` dereferences the user before checking it exists [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T03", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/billing/tasks.py\", line 12, in charge_card\n    audit_event(\"charge_card\", user_id=user.pk, amount=amount_cents)\nAttributeError: 'NoneType' object has no attribute 'pk'",
+      "gold": [["billing/tasks.py", "billing.tasks.charge_card"]],
+      "reference": ["`charge_card` assumes a user is present when emitting its audit event [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T04", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/common/utils.py\", line 24, in mask_email\n    local, domain = match.groups()\nAttributeError: 'NoneType' object has no attribute 'groups'",
+      "gold": [["common/utils.py", "common.utils.mask_email"]],
+      "reference": ["`mask_email` unpacks the regex match before checking it matched [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T05", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/billing/views.py\", line 20, in post\n    sub = Subscription.objects.get(pk=request.data[\"id\"])\nKeyError: 'id'",
+      "gold": [["billing/views.py", "billing.views.SubscriptionView.post"]],
+      "reference": ["`SubscriptionView.post` reads `id` from the request body without a default [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T06", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/billing/models.py\", line 27, in monthly_total\n    return self.plan.monthly_cents if self.active else 0\nAttributeError: 'NoneType' object has no attribute 'monthly_cents'",
+      "gold": [["billing/models.py", "billing.models.Subscription.monthly_total"]],
+      "reference": ["`monthly_total` dereferences the plan without checking it is set [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T07", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/authx/models.py\", line 42, in revoke\n    self.save(update_fields=[\"revoked_at\"])\nValueError: The following fields do not exist in this model",
+      "gold": [["authx/models.py", "authx.models.ApiToken.revoke"]],
+      "reference": ["`revoke` names `revoked_at` in `update_fields` [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T08", "class": "TRACE", "language": "python",
+      "query": "Traceback (most recent call last):\n  File \"/srv/app/common/utils.py\", line 14, in constant_time_equals\n    return hmac.compare_digest(left.encode(), right.encode())\nAttributeError: 'NoneType' object has no attribute 'encode'",
+      "gold": [["common/utils.py", "common.utils.constant_time_equals"]],
+      "reference": ["`constant_time_equals` encodes both arguments without a null check [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T09", "class": "TRACE", "language": "typescript", "app_router": true,
+      "query": "TypeError: Cannot read properties of undefined (reading 'id')\n    at GET (/app/.next/server/chunks/4821.js:1:5678)",
+      "gold": [["app/api/users/route.ts", "app.api.users.route.GET"], ["app/api/orders/route.ts", "app.api.orders.route.GET"]],
+      "expect_tier2_ambiguous": true,
+      "reference": ["The frame names `GET`, and several route files export a function by that name.", "I cannot tell which route this came from without a sourcemap."],
+      "claims": [true, false]
+    },
+    {
+      "id": "T10", "class": "TRACE", "language": "typescript", "app_router": true,
+      "query": "Error: bad request\n    at POST (/app/.next/server/chunks/4821.js:1:9012)",
+      "gold": [["app/api/users/route.ts", "app.api.users.route.POST"], ["app/api/orders/route.ts", "app.api.orders.route.POST"]],
+      "expect_tier2_ambiguous": true,
+      "reference": ["The frame names `POST`, which more than one route file exports.", "The compiled path cannot disambiguate it."],
+      "claims": [true, true]
+    },
+    {
+      "id": "T11", "class": "TRACE", "language": "typescript", "app_router": true,
+      "query": "TypeError: users.map is not a function\n    at GET (/app/.next/server/chunks/9002.js:1:120)\n    at async handler (/app/node_modules/next/dist/server/route.js:12:9)",
+      "gold": [["app/api/users/route.ts", "app.api.users.route.GET"], ["app/api/orders/route.ts", "app.api.orders.route.GET"]],
+      "expect_tier2_ambiguous": true,
+      "reference": ["The failing frame is a `GET` route handler, but the name is shared across route files."],
+      "claims": [true]
+    },
+    {
+      "id": "T12", "class": "TRACE", "language": "typescript",
+      "query": "TypeError: Cannot read properties of null (reading 'name')\n    at UserCard (/app/.next/server/chunks/1200.js:1:44)",
+      "gold": [["components/UserCard.tsx", "components.UserCard.UserCard"]],
+      "reference": ["`UserCard` reads a field from the fetched user before checking it loaded [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T13", "class": "TRACE", "language": "typescript",
+      "query": "Error: formatName failed\n    at formatName (/app/.next/server/chunks/1200.js:1:80)\n    at UserCard (/app/.next/server/chunks/1200.js:1:44)",
+      "gold": [["components/UserCard.tsx", "components.UserCard.UserCard"]],
+      "reference": ["The failure surfaces inside `UserCard`, which calls `formatName` on the fetch result [C1]."],
+      "claims": [true]
+    },
+    {
+      "id": "T14", "class": "TRACE", "language": "typescript",
+      "query": "TypeError: t is not a function\n    at t (/app/.next/server/chunks/4821.js:1:22)\n    at <anonymous>",
+      "gold": [["app/api/users/route.ts", "app.api.users.route"]],
+      "expect_mangled": true,
+      "reference": ["Both frames are minified, so neither names a symbol I can resolve.", "I cannot identify the failing function from this trace."],
+      "claims": [false, false]
+    },
+    {
+      "id": "T15", "class": "TRACE", "language": "typescript",
+      "query": "Error: describe failed\n    at UserCardError.describe (/app/.next/server/chunks/1200.js:1:300)",
+      "gold": [["components/UserCard.tsx", "components.UserCard.UserCardError.describe"]],
+      "reference": ["`UserCardError.describe` formats the user id with the message [C1]."],
+      "claims": [true]
+    }
+  ]
+}

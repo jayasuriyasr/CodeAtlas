@@ -1,0 +1,107 @@
+{
+  "corpus": "tests/fixtures/repos/django_min",
+  "stage": "retrieved",
+  "note": "Seed set for plan step 6: ~15 retrieval-only questions, gold symbols, no reference answers. Gold is named by (rel_path, qualified_name) rather than by UID, because a UID is a hash over repo_id and is not readable, reviewable, or stable across a repo rename. The harness resolves names to UIDs at run time. §8.1's full 45-question set with claim-sentence annotations arrives at step 10.",
+  "questions": [
+    {
+      "id": "q01",
+      "query": "how are API tokens issued",
+      "class": "SEMANTIC",
+      "gold": [["authx/services.py", "authx.services.issue_token"]]
+    },
+    {
+      "id": "q02",
+      "query": "where are credentials verified",
+      "class": "SEMANTIC",
+      "gold": [
+        ["authx/services.py", "authx.services.verify_credentials"],
+        ["common/utils.py", "common.utils.constant_time_equals"]
+      ]
+    },
+    {
+      "id": "q03",
+      "query": "what charges a customer card",
+      "class": "SEMANTIC",
+      "gold": [["billing/tasks.py", "billing.tasks.charge_card"]]
+    },
+    {
+      "id": "q04",
+      "query": "mask email address for logging",
+      "class": "SEMANTIC",
+      "gold": [["common/utils.py", "common.utils.mask_email"]]
+    },
+    {
+      "id": "q05",
+      "query": "run monthly billing for every active subscription",
+      "class": "SEMANTIC",
+      "gold": [["billing/tasks.py", "billing.tasks.run_monthly_billing"]]
+    },
+    {
+      "id": "q06",
+      "query": "getUserById",
+      "class": "STRUCTURAL",
+      "note": "§5.3's cross-form case: the symbol is get_user_by_id. A tokenizer applied on one side only returns nothing here and looks like a ranking problem.",
+      "gold": [["common/utils.py", "common.utils.get_user_by_id"]]
+    },
+    {
+      "id": "q07",
+      "query": "login endpoint",
+      "class": "SEMANTIC",
+      "gold": [["authx/views.py", "authx.views.LoginView.post"]]
+    },
+    {
+      "id": "q08",
+      "query": "health check view",
+      "class": "STRUCTURAL",
+      "gold": [["authx/views.py", "authx.views.HealthView"]]
+    },
+    {
+      "id": "q09",
+      "query": "revoke a token",
+      "class": "STRUCTURAL",
+      "gold": [
+        ["authx/models.py", "authx.models.ApiToken.revoke"],
+        ["authx/views.py", "authx.views.TokenRevokeView.delete"]
+      ]
+    },
+    {
+      "id": "q10",
+      "query": "soft delete a record",
+      "class": "SEMANTIC",
+      "note": "§8.1 wants >=5 SEMANTIC questions on undocumented or poorly-named code (§12.5). soft_delete has no docstring.",
+      "gold": [["common/mixins.py", "common.mixins.SoftDeleteMixin.soft_delete"]]
+    },
+    {
+      "id": "q11",
+      "query": "monthly total for a subscription",
+      "class": "SEMANTIC",
+      "note": "Undocumented: monthly_total has no docstring.",
+      "gold": [["billing/models.py", "billing.models.Subscription.monthly_total"]]
+    },
+    {
+      "id": "q12",
+      "query": "created and updated timestamps on a model",
+      "class": "SEMANTIC",
+      "gold": [["common/mixins.py", "common.mixins.TimestampMixin"]]
+    },
+    {
+      "id": "q13",
+      "query": "database url configuration",
+      "class": "SEMANTIC",
+      "gold": [["config/settings.py", "config.settings.database_url"]]
+    },
+    {
+      "id": "q14",
+      "query": "split items into batches of a fixed size",
+      "class": "SEMANTIC",
+      "gold": [["common/utils.py", "common.utils.chunked"]]
+    },
+    {
+      "id": "q15",
+      "query": "clock skew seconds",
+      "class": "STRUCTURAL",
+      "note": "Two platform-guarded definitions share (qualified_name, arity). Either ordinal counts as a hit: §3.2 makes them distinct symbols, and a retrieval question cannot know which branch is live.",
+      "gold": [["authx/services.py", "authx.services.clock_skew_seconds"]]
+    }
+  ]
+}

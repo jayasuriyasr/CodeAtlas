@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sei"
+version = "0.1.0"
+description = "Software Engineering Investigation Engine — repository-level GraphRAG"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+# The repo root is the import root: `config`, `graph`, `adapters` are top-level
+# modules, exactly as the plan's repo layout draws them.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "neo4j: requires a live Neo4j (docker compose up -d)",
+  "expects_unresolvable: deliberately drives move.unresolvable above zero",
+]

@@ -1,0 +1,16 @@
+# SEI dependencies. Every one is named by the spec; none is a new abstraction.
+#
+#   neo4j                  S6 "Direct Bolt" (§2)
+#   tree-sitter*           §3.4 chunking, §0.2 probe_tsx_grammar
+#   pytest                 the plan's gate mechanism
+#
+# Pinned to a compatible-release floor, not an exact version, except where the
+# spec's own warning about version drift applies (the Neo4j server itself is
+# pinned exactly in docker-compose.yml).
+
+neo4j~=5.26
+pytest~=8.3
+
+tree-sitter~=0.23
+tree-sitter-python~=0.23
+tree-sitter-typescript~=0.23
