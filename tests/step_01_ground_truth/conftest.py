@@ -61,10 +61,19 @@ def probe_log(request) -> ProbeLog:
 
 
 def _write(log: ProbeLog, config) -> None:
+    """Rewrite the report — but only from a run that reached the server.
+
+    Without a recorded server line the Neo4j probes were skipped, and the
+    report would be rewritten from the one offline probe: the committed,
+    verbatim record of every Cypher probe replaced by "Server: unrecorded".
+    Working rule 4 exists to keep that record, so an offline run leaves it.
+    """
     if not log.records:
         return
+    server = getattr(config, "_sei_server_line", None)
+    if server is None:
+        return
     stamp = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    server = getattr(config, "_sei_server_line", "unrecorded")
 
     lines = [
         "# Step 1 — probe results",
@@ -87,12 +96,14 @@ def _write(log: ProbeLog, config) -> None:
         lines += rec.observations or ["(nothing recorded — probe did not run)"]
         lines += ["```", "", f"**Verdict.** {rec.verdict}", ""]
 
-    RESULTS_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # LF on every platform, so a run on Windows does not rewrite every line.
+    RESULTS_MD.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     RESULTS_JSON.write_text(
         json.dumps(
             {n: r.__dict__ for n, r in sorted(log.records.items())}, indent=2
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 

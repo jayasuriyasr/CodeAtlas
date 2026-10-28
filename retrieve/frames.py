@@ -26,9 +26,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Collection, Protocol, Sequence
 
 import metrics
+from adapters.base import normalize_rel_path
 
 # --------------------------------------------------------------------------
 # Parsing
@@ -164,19 +165,61 @@ def error_message(text: str) -> str:
     return candidates[-1] if candidates else ""
 
 
-def normalize_path(file_path: str, repo_root: Path | str | None = None) -> str:
+def normalize_path(
+    file_path: str,
+    repo_root: Path | str | None = None,
+    known_paths: Collection[str] | None = None,
+) -> str:
     """A runtime path made repo-relative (§5.1 Tier 0's first step).
 
     Runtime paths are absolute and platform-shaped; `rel_path` is POSIX and
     repo-relative, and it is a UID input. Getting this wrong makes Tier 0 miss
     every frame while looking like a graph problem.
+
+    A trace usually comes from somewhere else — a container (`/app/...`), CI, a
+    colleague's checkout — so the local `repo_root` prefix rarely matches. When
+    `known_paths` (the graph's `:File` paths) is given, the longest trailing run
+    of path components that names exactly one known file wins. Two known files
+    sharing that suffix is a refusal, by the same rule as Tier 2: `views.py`
+    alone could be any of a dozen files.
     """
     path = file_path.replace("\\", "/")
     if repo_root is not None:
         root = str(Path(repo_root)).replace("\\", "/").rstrip("/")
-        if path.startswith(root + "/"):
+        if path.lower().startswith(root.lower() + "/"):
             return path[len(root) + 1 :]
-    return path.lstrip("./")
+    path = normalize_rel_path(path)
+
+    if known_paths and path not in known_paths:
+        parts = [p for p in path.split("/") if p]
+        for start in range(1, len(parts)):
+            suffix = "/".join(parts[start:])
+            matches = [k for k in known_paths if k == suffix or k.endswith("/" + suffix)]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                break                       # ambiguous: refuse, keep the raw path
+    return path
+
+
+#: Path fragments that mark a frame as library or runtime code. Such a frame is
+#: never a repository symbol, so name-matching it (Tier 2) could only produce a
+#: confident wrong answer: Django's own `dispatch` resolving to the one view in
+#: the repo that also defines `dispatch`.
+#: `/lib/python3.12/` needs its version digit: a repository may well have a
+#: `lib/python/` directory of its own.
+_LIBRARY_PATH_RE = re.compile(
+    r"(?:^|/)(?:site-packages|dist-packages|node_modules)/"
+    r"|/lib/python\d"
+    r"|^node:"
+    r"|^<frozen "
+)
+
+
+def is_library_path(file_path: str | None) -> bool:
+    if not file_path:
+        return False
+    return bool(_LIBRARY_PATH_RE.search(file_path.replace("\\", "/").lower()))
 
 
 # --------------------------------------------------------------------------
@@ -196,11 +239,21 @@ class FrameReader(Protocol):
 class FrameResolver:
     reader: FrameReader
     repo_root: Path | str | None = None
+    #: The graph's `:File` paths, for matching a trace recorded on another
+    #: machine by path suffix. Optional: without it Tier 0 needs `repo_root`.
+    known_paths: Collection[str] | None = None
 
     def resolve(self, repo_id: str, frame: StackFrame) -> ResolvedFrame:
         """One frame, through the tiers in order."""
         if is_mangled(frame.fn_name) and frame.file_path is None:
             metrics.incr("trace.mangled_skipped")
+            return ResolvedFrame(frame, None, "unresolved", 0.0)
+
+        if is_library_path(frame.file_path):
+            # Library and runtime frames are not repository code. Tier 0 cannot
+            # find them and Tier 2 must not try: a unique name match on
+            # Django's `dispatch` is a confident citation into the wrong file.
+            metrics.incr("trace.library_frame")
             return ResolvedFrame(frame, None, "unresolved", 0.0)
 
         direct = self._tier0(repo_id, frame)
@@ -224,7 +277,7 @@ class FrameResolver:
         if frame.file_path is None or frame.line_no is None:
             return None
 
-        rel_path = normalize_path(frame.file_path, self.repo_root)
+        rel_path = normalize_path(frame.file_path, self.repo_root, self.known_paths)
         found = self.reader.symbol_at_line(repo_id, rel_path, frame.line_no)
         if found is None:
             return None

@@ -17,6 +17,7 @@ Three things differ from Python and each one is a defect if missed:
 
 from __future__ import annotations
 
+import posixpath
 import re
 
 from adapters.base import (
@@ -29,6 +30,7 @@ from adapters.base import (
     symbol_uid,
 )
 from adapters.grammars import tsx_parser, walk
+from config import TS_PATH_ALIASES
 
 #: Nodes that become symbols. `function_signature` is here for F-002.
 _DEF_NODES = (
@@ -206,7 +208,11 @@ class TypeScriptAdapter:
             )
 
         parsed.symbols = [sym for sym, _ in collected]
-        parsed.edges = self._edges(collected, source, rel_path, imports, module_qname)
+        # Edge targets use import specifiers resolved to module names; the
+        # header keeps what the developer wrote (as the Python adapter does),
+        # so resolution rules can change without invalidating the cache.
+        targets = _resolve_import_table(root, source, rel_path)
+        parsed.edges = self._edges(collected, source, rel_path, targets, module_qname)
         return parsed
 
     # ----------------------------------------------------------------------
@@ -421,9 +427,9 @@ class TypeScriptAdapter:
 # --------------------------------------------------------------------------
 
 
-def _import_table(root, source: bytes) -> dict[str, str]:
-    """Local binding -> module specifier, for the whole file."""
-    table: dict[str, str] = {}
+def _import_bindings(root, source: bytes) -> dict[str, tuple[str, str | None]]:
+    """Local binding -> (module specifier, imported name or None for `* as`)."""
+    table: dict[str, tuple[str, str | None]] = {}
     for node in walk(root):
         if node.type != "import_statement":
             continue
@@ -437,15 +443,62 @@ def _import_table(root, source: bytes) -> dict[str, str]:
                 name = child.child_by_field_name("name")
                 local = alias if alias is not None else name
                 if local is not None and name is not None:
-                    table[_text(local, source)] = f"{module}.{_text(name, source)}"
+                    table[_text(local, source)] = (module, _text(name, source))
             elif child.type == "namespace_import":
                 for grand in child.named_children:
-                    table[_text(grand, source)] = module
+                    table[_text(grand, source)] = (module, None)
             elif child.type == "import_clause":
                 for grand in child.named_children:
                     if grand.type == "identifier":     # default import
-                        table[_text(grand, source)] = f"{module}.default"
+                        table[_text(grand, source)] = (module, "default")
     return table
+
+
+def _import_table(root, source: bytes) -> dict[str, str]:
+    """Local binding -> specifier as written, for the context header (§3.4)."""
+    return {
+        local: f"{module}.{name}" if name else module
+        for local, (module, name) in _import_bindings(root, source).items()
+    }
+
+
+def _resolve_import_table(root, source: bytes, rel_path: str) -> dict[str, str]:
+    """Local binding -> resolved target, for edges (§11.2 3b matches by name)."""
+    out = {}
+    for local, (module, name) in _import_bindings(root, source).items():
+        resolved = resolve_specifier(module, rel_path)
+        out[local] = f"{resolved}.{name}" if name else resolved
+    return out
+
+
+def resolve_specifier(spec: str, rel_path: str) -> str:
+    """An import specifier as the module qualified name it names, if knowable.
+
+    `../lib/users` from `app/api/users/route.ts` is `app/lib/users`, so
+    `app.lib.users`; `@/lib/users` under the default alias is `lib.users`. A
+    bare package (`react`, `next/server`) and anything that climbs out of the
+    repository are returned unchanged, which can match no symbol — the edge is
+    then dropped as a call into a library, which is what it is.
+
+    `./lib` that is really `./lib/index.ts` resolves to `lib`, not `lib.index`,
+    and so does not match: directory imports need the bundler's resolution
+    rules, and guessing them would be a wrong edge rather than a missing one.
+    """
+    if spec.endswith("/") or spec in (".", ".."):
+        return spec                         # a directory import: bundler territory
+    path: str | None = None
+    for alias, target in TS_PATH_ALIASES.items():
+        if spec.startswith(alias):
+            path = target + spec[len(alias):]
+            break
+    if path is None:
+        if not (spec.startswith("./") or spec.startswith("../")):
+            return spec
+        base = posixpath.dirname(normalize_rel_path(rel_path))
+        path = posixpath.normpath(posixpath.join(base, spec))
+    if path in ("", ".") or path.startswith("../") or path == "..":
+        return spec
+    return module_qualified_name(path)
 
 
 def _used_imports(node, source: bytes, table: dict[str, str]) -> list[str]:

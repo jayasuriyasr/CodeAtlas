@@ -19,6 +19,40 @@ from dataclasses import dataclass
 
 from neo4j import Driver
 
+from adapters.base import Symbol
+
+
+def symbol_from_props(repo_id: str, props: dict) -> Symbol:
+    """Rebuild a `Symbol` from the properties §11.2 3a stored.
+
+    Every field the packer renders is restored — the context header needs
+    `enclosing_signature` and `used_imports` (§3.4.2), which a neighbour row from
+    §11.1 does not carry. Missing properties fall back to empty values rather
+    than raising: a node written by an older build is still packable.
+    """
+    return Symbol(
+        uid=props["uid"],
+        repo_id=repo_id,
+        rel_path=props.get("rel_path") or "",
+        qualified_name=props.get("qualified_name") or "",
+        name=props.get("name") or "",
+        arity=props.get("arity") or 0,
+        ordinal=props.get("ordinal") or 0,
+        kind=props.get("kind") or "function",
+        signature=props.get("signature") or "",
+        docstring=props.get("docstring"),
+        source_code=props.get("source_code") or "",
+        enclosing_signature=props.get("enclosing_signature"),
+        used_imports=list(props.get("used_imports") or []),
+        decorators=list(props.get("decorators") or []),
+        start_line=props.get("start_line") or 0,
+        end_line=props.get("end_line") or 0,
+        is_client_component=bool(props.get("is_client_component")),
+        header_hash=props.get("header_hash"),
+        body_hash=props.get("body_hash"),
+        search_text=props.get("search_text"),
+    )
+
 
 @dataclass(frozen=True)
 class NamedSymbol:
@@ -192,6 +226,31 @@ class GraphReader:
         ]
 
     # -- helpers the tests and the packer share ---------------------------
+
+    def symbols(self, repo_id: str, uids: list[str]) -> dict[str, Symbol]:
+        """`uid -> Symbol` for the packer, in one read.
+
+        `code_vec` is projected out: 1,536 floats per symbol are what the
+        vector index needs and nothing the packer reads. Missing uids are
+        absent from the result rather than an error — a symbol deleted between
+        retrieval and packing is simply not packed.
+        """
+        if not uids:
+            return {}
+        rows = self._run(
+            """
+            MATCH (s:Symbol {repo_id: $repo_id})
+            WHERE s.uid IN $uids
+            RETURN s {.*, code_vec: null} AS s
+            """,
+            repo_id=repo_id,
+            uids=list(dict.fromkeys(uids)),
+        )
+        out = {}
+        for row in rows:
+            props = dict(row["s"])
+            out[props["uid"]] = symbol_from_props(repo_id, props)
+        return out
 
     def symbol(self, repo_id: str, uid: str) -> dict | None:
         rows = self._run(

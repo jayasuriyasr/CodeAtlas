@@ -110,6 +110,26 @@ def _chunked(items: Sequence, size: int):
         yield items[start : start + size]
 
 
+#: Sentinel for "a candidate set was found and refused" — distinct from None,
+#: which means nothing was found at all. The two feed different counters.
+_REFUSED = object()
+
+
+def _hint_prefixes(hint: str) -> list[str]:
+    """`a.b.c` -> `[a.b.c, a.b, a]`, longest first.
+
+    A prefix with an empty segment is skipped: no qualified name contains one,
+    so a hint like `..lib.x` (an unresolved relative path) can only produce
+    look-ups that are guaranteed to miss.
+    """
+    parts = hint.split(".")
+    return [
+        ".".join(parts[:cut])
+        for cut in range(len(parts), 0, -1)
+        if all(parts[:cut])
+    ]
+
+
 # --------------------------------------------------------------------------
 # The writer
 # --------------------------------------------------------------------------
@@ -243,7 +263,7 @@ class GraphWriter:
         boundary("3a")
 
         # -- 3b. Edges, one statement per relationship type -----------------
-        resolved = self._resolve_edge_targets(repo_id, edges, report)
+        resolved = self._resolve_edge_targets(repo_id, edges, report, paths, epoch)
         report.edges_written = self._upsert_edges(resolved, epoch)
         boundary("3b")
 
@@ -318,7 +338,12 @@ class GraphWriter:
         return written
 
     def _resolve_edge_targets(
-        self, repo_id: str, edges: list[Edge], report: WriteReport
+        self,
+        repo_id: str,
+        edges: list[Edge],
+        report: WriteReport,
+        batch_paths: list[str],
+        epoch: int,
     ) -> list[Edge]:
         """Turn `target_hint` into `target_uid` where the graph can say so.
 
@@ -336,55 +361,80 @@ class GraphWriter:
         A hint like `authx.models.User.objects.filter` is retried against
         successively shorter prefixes, because attribute access on a symbol is
         still a reference to that symbol. The trimming is deterministic and
-        stops at the first prefix with exactly one candidate.
+        stops at the first prefix with exactly one candidate — **but never at a
+        module reached by trimming.** `pkg.z_callee.helper` with `z_callee` not
+        yet indexed would otherwise trim to the package `pkg` and write
+        `run -CALLS-> pkg`: a confident edge to the wrong node, while `helper`
+        reports zero callers (FINDINGS F-015). A module is a valid target only
+        when the hint names it exactly, as an `import` does.
+
+        Two more rules keep the candidate set honest:
+
+        * **Symbols this batch is about to delete are not candidates.** A
+          symbol at a batch path with an older epoch is step 5's orphan — the
+          previous version of something 3a just rewrote. Counting it makes a
+          signature change and its caller, saved together, look ambiguous, and
+          the edge is refused for a reason that is gone one statement later.
+        * **The lookup goes through `symbol_name`.** `qualified_name` has no
+          index (§11.3), so matching on it alone is a label scan per name. Every
+          symbol's `name` is the last segment of its `qualified_name`, so the
+          pair is an exact, index-served restatement of the same predicate.
         """
         pending = [e for e in edges if e.target_uid is None and e.target_hint]
         already = [e for e in edges if e.target_uid is not None]
+        report.edges_unresolved = len(edges) - len(already) - len(pending)
         if not pending:
-            report.edges_unresolved = len(edges) - len(already)
             return already
 
         candidates: set[str] = set()
         for edge in pending:
-            parts = edge.target_hint.split(".")
-            for cut in range(len(parts), 0, -1):
-                candidates.add(".".join(parts[:cut]))
+            candidates.update(_hint_prefixes(edge.target_hint))
 
-        counts: dict[str, list[str]] = {}
-        names = sorted(candidates)
-        for chunk in _chunked(names, WRITE_CHUNK_SIZE):
+        found: dict[str, list[dict]] = {}
+        rows = [{"qn": qn, "name": qn.rsplit(".", 1)[-1]} for qn in sorted(candidates)]
+        for chunk in _chunked(rows, WRITE_CHUNK_SIZE):
             for row in self._run(
                 """
                 UNWIND $names AS n
-                MATCH (s:Symbol {repo_id: $repo_id, qualified_name: n})
-                RETURN n AS name, collect(s.uid) AS uids
+                MATCH (s:Symbol {repo_id: $repo_id, name: n.name})
+                WHERE s.qualified_name = n.qn
+                  AND NOT (s.origin_path IN $batch_paths AND s.epoch < $epoch)
+                RETURN n.qn AS name, collect({uid: s.uid, kind: s.kind}) AS candidates
                 """,
                 names=chunk,
                 repo_id=repo_id,
+                batch_paths=batch_paths,
+                epoch=epoch,
             ):
-                counts[row["name"]] = row["uids"]
+                found[row["name"]] = row["candidates"]
 
         out = list(already)
         for edge in pending:
-            parts = edge.target_hint.split(".")
-            for cut in range(len(parts), 0, -1):
-                uids = counts.get(".".join(parts[:cut]))
-                if not uids:
+            full = edge.target_hint
+            target = None
+            for prefix in _hint_prefixes(full):
+                hits = found.get(prefix)
+                if not hits:
                     continue
-                if len(uids) > 1:
+                if len(hits) > 1:
                     report.edges_ambiguous += 1
-                    break                 # refuse, do not guess
+                    target = _REFUSED
+                elif prefix != full and hits[0]["kind"] == "module":
+                    target = None             # trimmed onto a module: a guess
+                else:
+                    target = hits[0]["uid"]
+                break
+            if target is None:
+                report.edges_unresolved += 1
+            elif target is not _REFUSED:
                 out.append(
                     Edge(
                         source_uid=edge.source_uid,
                         kind=edge.kind,
                         origin_path=edge.origin_path,
-                        target_uid=uids[0],
+                        target_uid=target,
                     )
                 )
-                break
-            else:
-                report.edges_unresolved += 1
         return out
 
     def _upsert_edges(self, edges: list[Edge], epoch: int) -> int:

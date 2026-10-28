@@ -23,6 +23,7 @@ import metrics
 from adapters.base import Symbol
 from config import (
     AVAILABLE,
+    COVERAGE_RETRY_THRESHOLD,
     LLM_INPUT_RATE_USD_PER_MTOK,
     LLM_MODEL,
     LLM_OUTPUT_RATE_USD_PER_MTOK,
@@ -44,19 +45,28 @@ class AnswerCost:
     §5.4: "What determines actual cost is p50 packed tokens, not the ceiling."
     Both are recorded per answer so the p50 is a measurement rather than an
     estimate, and decision 0002's lever has data to be pulled against.
+
+    `packed_tokens` is the context the kept answer was grounded on — §5.4's
+    quantity. `input_tokens` and `output_tokens` are what was *billed*, summed
+    over every generation: a §6.3 retry sends a second prompt and receives a
+    second answer, and a `$/query` that counted only the one shown would
+    understate exactly the queries that cost most. When the provider reports
+    its own usage those are its numbers; otherwise they are counted locally.
+    `input_tokens` of None falls back to `packed_tokens`, §5.4's approximation.
     """
 
     packed_tokens: int
     output_tokens: int
     model: str = LLM_MODEL
+    input_tokens: int | None = None
+    generations: int = 1
 
     @property
     def usd(self) -> float:
         rate_in = LLM_INPUT_RATE_USD_PER_MTOK or 0.0
         rate_out = LLM_OUTPUT_RATE_USD_PER_MTOK or 0.0
-        return (
-            self.packed_tokens * rate_in + self.output_tokens * rate_out
-        ) / 1_000_000
+        billed_in = self.packed_tokens if self.input_tokens is None else self.input_tokens
+        return (billed_in * rate_in + self.output_tokens * rate_out) / 1_000_000
 
 
 @dataclass
@@ -71,12 +81,29 @@ class AnswerResult:
     total_seconds: float | None = None
     cost: AnswerCost | None = None
     events: list = field(default_factory=list)
+    #: What retrieval wants the reader told: per-frame badges (§5.1), a
+    #: degraded vector arm (§9.3), the route actually taken. Empty when the
+    #: retriever has nothing to say.
+    notes: dict = field(default_factory=dict)
+    #: Billed totals across every generation, for `AnswerCost`.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    generations: int = 0
 
 
-#: Retrieval is injected: `(question, routed) -> (seeds, neighbors)`. The query
-#: path is testable without a database this way, and step 6's retriever and
-#: step 7's frame resolver plug in behind the same signature.
-Retriever = Callable[[str, Routed], "tuple[Sequence[Block], Sequence[Block]]"]
+#: Retrieval is injected: `(question, routed) -> (seeds, neighbors)`, or
+#: `(seeds, neighbors, notes)` when it has something to surface. The query path
+#: is testable without a database this way, and `retrieve.pipeline` plugs the
+#: real router-driven retrieval in behind the same signature.
+Retriever = Callable[[str, Routed], "tuple"]
+
+class SynthesisUnavailable(RuntimeError):
+    """The LLM provider failed before or during an answer (§9.3)."""
+
+
+#: §6.3's "bounded expansion around uncited/conflicting spans": uids in,
+#: neighbour blocks out. Optional — without it a retry can only promote.
+Expander = Callable[[Sequence[str]], Sequence[Block]]
 
 
 @dataclass
@@ -90,6 +117,7 @@ class InvestigationService:
     graph_runner: object | None = None
     repo_id: str = ""
     available: int = AVAILABLE
+    expander: Expander | None = None
 
     def answer(self, question: str) -> AnswerResult:
         """Run the full path, collecting events rather than streaming them."""
@@ -107,16 +135,29 @@ class InvestigationService:
     def _run(self, question: str) -> Iterator[tuple[object, AnswerResult]]:
         started = time.perf_counter()
         routed = self.router.route(question)
-        seeds, neighbors = self.retriever(question, routed)
+        retrieved = self.retriever(question, routed)
+        seeds, neighbors = retrieved[0], retrieved[1]
+        notes = dict(retrieved[2]) if len(retrieved) > 2 and retrieved[2] else {}
         context = pack(seeds, neighbors, self.tokenizer, available=self.available)
 
-        result = AnswerResult(question=question, routed=routed, context=context)
+        result = AnswerResult(
+            question=question, routed=routed, context=context, notes=notes
+        )
+        if notes:
+            event = {"type": "retrieval", **notes}
+            result.events.append(event)
+            yield (event, result)
+
         known_names = frozenset(
             p.block.symbol.qualified_name for p in context.blocks
         )
 
         prompt = build_prompt(question, context)
-        yield from self._generate(result, SYSTEM, prompt, known_names, started)
+        try:
+            yield from self._generate(result, SYSTEM, prompt, known_names, started)
+        except SynthesisUnavailable as exc:
+            yield from self._retrieval_only(result, exc, started)
+            return
 
         # §6.3: one retry, bounded, never a loop.
         if should_retry(result.report):
@@ -125,30 +166,120 @@ class InvestigationService:
                 result.report, [b.uid for b in context.dropped], context.handles
             )
             promoted = _promote(seeds, neighbors, context, plan.promote)
+            retry_neighbors = self._expand_for_retry(neighbors, plan.expand_around)
             retry_context = pack(
-                promoted, neighbors, self.tokenizer, available=self.available
+                promoted, retry_neighbors, self.tokenizer, available=self.available
             )
+            added = _uids(retry_context) - _uids(context)
             result.context = retry_context
             result.retried = True
             known_names = frozenset(
                 p.block.symbol.qualified_name for p in retry_context.blocks
             )
-            yield from self._generate(
-                result,
-                SYSTEM,
-                build_retry_prompt(question, retry_context, plan.reason),
-                known_names,
-                started,
-                retry_count=1,
-            )
+            event = {"type": "retry", "reason": plan.reason, "added_blocks": len(added)}
+            result.events.append(event)
+            yield (event, result)
+            try:
+                yield from self._generate(
+                    result,
+                    SYSTEM,
+                    build_retry_prompt(
+                        question, retry_context, plan.reason, added_context=bool(added)
+                    ),
+                    known_names,
+                    started,
+                    retry_count=1,
+                )
+            except SynthesisUnavailable as exc:
+                # The first answer stands, judged against the context it saw.
+                metrics.incr("synthesis.unavailable")
+                result.context = context
+                event = {"type": "synthesis_unavailable", "during": "retry",
+                         "reason": str(exc)}
+                result.events.append(event)
+                yield (event, result)
 
         result.total_seconds = time.perf_counter() - started
         result.cost = AnswerCost(
             packed_tokens=result.context.packed_tokens,
-            output_tokens=self.tokenizer.count(result.text),
+            output_tokens=result.output_tokens,
+            input_tokens=result.input_tokens,
+            generations=result.generations,
         )
         metrics.incr("answer.packed_tokens", result.context.packed_tokens)
-        yield ({"type": "done", "report": result.report.render()}, result)
+        # §6.3's last line: a retry that still fails is surfaced honestly, not
+        # hidden behind the second answer.
+        needs_review = result.retried and (
+            result.report.coverage < COVERAGE_RETRY_THRESHOLD
+            or result.report.conflict_flags > 0
+        )
+        yield (
+            {
+                "type": "done",
+                "report": result.report.render(),
+                "context": result.context.report(),
+                "retried": result.retried,
+                "needs_review": needs_review,
+            },
+            result,
+        )
+
+    def _retrieval_only(
+        self, result: AnswerResult, exc: Exception, started: float
+    ) -> Iterator[tuple[object, AnswerResult]]:
+        """§9.3, "LLM provider": retrieval-only — ranked code blocks, no prose.
+
+        Whatever text arrived before the failure has already been shown, but it
+        is not graded: a half-answer's Coverage measures where the stream broke,
+        not how well the model cited.
+        """
+        metrics.incr("synthesis.unavailable")
+        result.report = None
+        result.total_seconds = time.perf_counter() - started
+        blocks = [
+            {
+                "handle": p.handle,
+                "uid": p.uid,
+                "qualified_name": p.block.symbol.qualified_name,
+                "rel_path": p.block.symbol.rel_path,
+                "level": p.level,
+            }
+            for p in result.context.blocks
+        ]
+        event = {"type": "synthesis_unavailable", "during": "answer",
+                 "reason": str(exc), "blocks": blocks}
+        result.events.append(event)
+        yield (event, result)
+        yield (
+            {
+                "type": "done",
+                "report": "Synthesis unavailable",
+                "context": result.context.report(),
+                "retried": False,
+                "needs_review": True,
+            },
+            result,
+        )
+
+    def _expand_for_retry(
+        self, neighbors: Sequence[Block], around: Sequence[str]
+    ) -> list[Block]:
+        """§6.3's bounded expansion, merged under the neighbours already held.
+
+        Bounded twice over: §11.1's own limits cap what the expander returns,
+        and everything it returns still has to fit the neighbour budget in
+        `pack`. A block already present keeps its original score.
+        """
+        merged = list(neighbors)
+        if not around or self.expander is None:
+            return merged
+        held = {b.uid for b in merged}
+        for block in self.expander(list(around)):
+            if block.uid not in held:
+                merged.append(block)
+                held.add(block.uid)
+        metrics.incr("ground.retry_expanded", len(merged) - len(neighbors))
+        return merged
 
     def _generate(
         self,
@@ -162,13 +293,26 @@ class InvestigationService:
         validator = StreamingValidator(
             handle_map=result.context.handles, known_names=known_names
         )
-        first_token = True
+        usage: dict = {}
 
-        for chunk in self.llm.stream(system, prompt, max_tokens=RESERVED_OUT):
+        chunks = iter(self.llm.stream(system, prompt, max_tokens=RESERVED_OUT, usage=usage))
+        while True:
+            # Only the provider's own failures are §9.3's "LLM provider" row.
+            # The validator runs outside this `try`, so a defect in it still
+            # surfaces as the defect it is.
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
+            except Exception as exc:               # noqa: BLE001 - typed below
+                raise SynthesisUnavailable(f"{type(exc).__name__}: {exc}") from exc
             for event in validator.feed(chunk):
-                if first_token and isinstance(event, TextEvent):
+                # TTFT is the *first* token the reader sees. A retry's first
+                # token arrives after a whole answer and is not a latency the
+                # user perceives as waiting to start; overwriting would inflate
+                # §8.2's p95 by exactly the retried queries.
+                if result.ttft_seconds is None and isinstance(event, TextEvent):
                     result.ttft_seconds = time.perf_counter() - started
-                    first_token = False
                 result.events.append(event)
                 yield (event, result)
 
@@ -177,6 +321,13 @@ class InvestigationService:
             yield (event, result)
 
         result.text = validator.text
+        result.generations += 1
+        result.input_tokens += usage.get("input_tokens") or (
+            self.tokenizer.count(system) + self.tokenizer.count(prompt)
+        )
+        result.output_tokens += usage.get("output_tokens") or self.tokenizer.count(
+            validator.text
+        )
         # T3 runs post-stream, on the whole answer (§6.1's tier table).
         result.report = ground(
             validator.text,
@@ -216,6 +367,10 @@ def _promote(
     return promoted + [b for b in seeds if b.uid not in wanted]
 
 
+def _uids(context: PackedContext) -> set[str]:
+    return {p.uid for p in context.blocks}
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -234,19 +389,41 @@ def sse(event: object) -> str:
             "handles": list(event.handles),
             "badge": event.badge,
             "reason": event.reason,
+            "amends": event.amends,
         }
     else:
         payload = dict(event)  # type: ignore[arg-type]
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def create_app(service: InvestigationService, indexer=None):
-    """The FastAPI surface. Two routes: ask, and the §4.4 rename ingress."""
+def create_app(service: InvestigationService, indexer=None, repos: Sequence[str] = ()):
+    """The FastAPI surface: ask, the §4.4 rename ingress, and Sync Project.
+
+    The indexing routes are `async def` on purpose. `Indexer.on_rename` arms a
+    debounce timer on the running event loop (§4.1); a plain `def` route runs in
+    FastAPI's thread pool, where there is no loop, and every rename from a real
+    editor would fail with `RuntimeError: no running event loop`.
+
+    `repos` are the repositories whose `_indexed` set is seeded at startup
+    (§4.1 `startup`) — without it every first flush pays for Signal B's git
+    subprocess.
+    """
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
     from pydantic import BaseModel
 
-    app = FastAPI(title="SEI")
+    @asynccontextmanager
+    async def lifespan(_app):
+        if indexer is not None and hasattr(indexer, "startup"):
+            for repo in repos:
+                await indexer.startup(repo)
+        yield
+        if indexer is not None and hasattr(indexer, "aclose"):
+            await indexer.aclose()
+
+    app = FastAPI(title="SEI", lifespan=lifespan)
 
     class Ask(BaseModel):
         question: str
@@ -255,6 +432,9 @@ def create_app(service: InvestigationService, indexer=None):
         repo: str
         old_path: str
         new_path: str
+
+    class Sync(BaseModel):
+        repo: str
 
     @app.post("/ask")
     def ask(body: Ask):
@@ -265,11 +445,25 @@ def create_app(service: InvestigationService, indexer=None):
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     @app.post("/index/rename")
-    def rename(body: Rename):
+    async def rename(body: Rename):
         """§4.4 Signal A's HTTP binding. The editor plugin posts here."""
         if indexer is None:
             return {"accepted": False, "reason": "no indexer configured"}
+        if body.repo not in getattr(indexer, "roots", {body.repo: None}):
+            # A flush for a repo with no root would fail reading the new path,
+            # in a background task where nobody sees the error.
+            return {"accepted": False, "reason": f"unknown repo {body.repo!r}"}
         indexer.on_rename(body.repo, body.old_path, body.new_path)
+        return {"accepted": True}
+
+    @app.post("/index/sync")
+    async def sync(body: Sync):
+        """§4.1's Sync Project button — the recovery path for undetected moves."""
+        if indexer is None or not hasattr(indexer, "sync_project"):
+            return {"accepted": False, "reason": "no indexer configured"}
+        if body.repo not in getattr(indexer, "roots", {body.repo: None}):
+            return {"accepted": False, "reason": f"unknown repo {body.repo!r}"}
+        await indexer.sync_project(body.repo)
         return {"accepted": True}
 
     @app.get("/healthz")

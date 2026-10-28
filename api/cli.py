@@ -1,14 +1,20 @@
-"""The CLI. Cut-ladder step 4 drops the Next.js console; this is what remains.
+"""The CLI, and the server entry point. Cut-ladder step 4 drops the Next.js
+console; this is what remains.
 
 Plan §9: "*(Cut-ladder)* Next.js console. CLI is sufficient to gate this step."
 So this is the surface the step 9 gate is demonstrated through — a real question
 about the Django fixture, answered with citations, streamed.
 
-`python -m api.cli --repo <id> --root <path> "how are tokens issued"`
+    python -m api.cli --repo <id> --root <path> --reindex "how are tokens issued"
+    python -m api.cli --repo <id> --root <path> --offline "what calls `charge_card`"
+    python -m api.cli --repo <id> --root <path> --sync
+    python -m api.cli --repo <id> --root <path> --serve --port 8000
 
-It wires the real components end to end: index the tree, retrieve, expand, pack,
-synthesize, validate. Which is also why it needs a live Neo4j and a configured
-provider — every substitute that makes a unit test safe makes this demo a lie.
+It wires the real components end to end: index the tree with both language
+adapters, route the question (§5.1), retrieve by the route, expand, pack,
+synthesize, validate. Which is also why it needs a live Neo4j and configured
+providers — every substitute that makes a unit test safe makes this demo a lie,
+and each one in use is announced on stderr.
 """
 
 from __future__ import annotations
@@ -18,12 +24,15 @@ import asyncio
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import metrics
 from adapters.python import PythonAdapter
+from adapters.typescript import TypeScriptAdapter
 from config import (
     EMBED_MODEL,
+    EMBEDDING_CACHE_PATH,
     LLM_MODEL,
     NEO4J_DEFAULT_DATABASE,
     NEO4J_PASSWORD,
@@ -39,11 +48,12 @@ from index.providers import (
     AnthropicProvider,
     ApproxCodeTokenizer,
     HashEmbeddingProvider,
+    VoyageEmbeddingProvider,
 )
-from pack.render import Block
 from retrieve.expand import NeighborhoodExpander
 from retrieve.hybrid import HybridRetriever, Neo4jSearchBackend
-from retrieve.router import QueryClass
+from retrieve.pipeline import QueryRetriever
+from retrieve.structural import StructuralResolver
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("question", nargs="?", help="the question to answer")
     parser.add_argument("--repo", default="local", help="repo_id (§9.1 tenancy key)")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="repository root")
-    parser.add_argument("--reindex", action="store_true", help="run a full reconcile first")
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="re-index the whole tree first, re-resolving every edge",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Sync Project (§4.1): the recovery path for undetected moves",
+    )
     parser.add_argument(
         "--offline",
         action="store_true",
@@ -60,7 +79,24 @@ def build_parser() -> argparse.ArgumentParser:
             "only — no source leaves the machine."
         ),
     )
+    parser.add_argument("--serve", action="store_true", help="run the HTTP API (FastAPI + SSE)")
+    parser.add_argument("--host", default="127.0.0.1", help="--serve bind address")
+    parser.add_argument("--port", type=int, default=8000, help="--serve port")
     return parser
+
+
+def _utf8_streams() -> None:
+    """Make stdout/stderr able to print ✓ and ⚠ wherever this runs.
+
+    A Windows console or a redirected stream defaults to the locale code page
+    (cp1252), which cannot encode the badges §6.4 prints: the first cited
+    sentence raised `UnicodeEncodeError` and killed the answer mid-stream.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass                                  # not a reconfigurable text stream
 
 
 def _driver():
@@ -70,119 +106,29 @@ def _driver():
 
 
 def _embedding_provider(offline: bool):
-    """The real provider needs a key; the stand-in says so in its name.
+    """The real provider when a key is configured; the stand-in otherwise.
 
-    §12.0 is a scoping decision, not a caveat: running with `--offline` keeps
-    source on the machine, and the retrieval it produces is fulltext-quality
-    only (F-009).
+    Returns `(provider, vectors_meaningful)`. The stand-in's vectors carry no
+    semantic structure (F-009), so with it the vector arm is switched off for
+    queries rather than fused in as noise.
     """
-    if offline or not os.environ.get("VOYAGE_API_KEY"):
-        if not offline:
-            print(
-                "warning: VOYAGE_API_KEY not set; falling back to the stand-in "
-                "embedding provider. Vector search will return noise (F-009).",
-                file=sys.stderr,
-            )
-        return HashEmbeddingProvider()
-
-    raise SystemExit(
-        f"A real {EMBED_MODEL} client is not wired yet. Run with --offline, or "
-        f"implement the provider before relying on vector recall."
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if not args.question and not args.reindex:
-        build_parser().print_help()
-        return 2
-
-    driver = _driver()
-    try:
-        driver.verify_connectivity()
-    except Exception as exc:                       # noqa: BLE001 - report, don't mask
-        print(f"Neo4j unavailable at {NEO4J_URI}: {exc}", file=sys.stderr)
-        print("Start it with: docker compose up -d", file=sys.stderr)
-        return 1
-
-    database = NEO4J_DEFAULT_DATABASE
-    apply_schema(driver, database)
-
-    writer = GraphWriter(driver, database)
-    reader = GraphReader(driver, database)
-    tokenizer = ApproxCodeTokenizer()
-    provider = _embedding_provider(args.offline)
-    cache = EmbeddingCache(model=provider.name)
-
-    if args.reindex:
-        indexer = Indexer(
-            writer=writer, reader=reader, cache=cache, provider=provider,
-            tokenizer=tokenizer, roots={args.repo: args.root},
-            adapters={ext: PythonAdapter() for ext in PythonAdapter.extensions},
-        )
-        started = time.perf_counter()
-        asyncio.run(indexer.full_reconcile(args.repo))
-        print(f"indexed {args.root} in {time.perf_counter() - started:.1f}s", file=sys.stderr)
-
-    if not args.question:
-        return 0
-
-    retriever = HybridRetriever(backend=Neo4jSearchBackend(driver, database))
-    expander = NeighborhoodExpander(runner=_Runner(driver, database))
-
-    def retrieve(question: str, routed):
-        vec = provider.embed([question])[0] if not args.offline else None
-        candidates = retriever.search(args.repo, question, query_vec=vec)
-        seed_uids = [c.uid for c in candidates[:8]]
-
-        seeds = [
-            Block(symbol=sym, score=1.0 / (rank + 1))
-            for rank, uid in enumerate(seed_uids)
-            if (sym := _load(reader, args.repo, uid)) is not None
-        ]
-        neighbors = [
-            Block(symbol=_neighbor_symbol(n), score=n.score)
-            for n in expander.expand(args.repo, seed_uids)
-        ]
-        return seeds, neighbors
-
-    if args.offline:
-        seeds, neighbors = retrieve(args.question, None)
-        print(f"# Retrieval only (--offline). Model {LLM_MODEL} not called.\n")
-        for block in seeds:
-            print(f"  {block.symbol.rel_path}::{block.symbol.qualified_name}")
-        return 0
-
-    from api.app import InvestigationService
-    from api.stream import SentenceEvent, TextEvent
-
-    service = InvestigationService(
-        retriever=retrieve,
-        llm=AnthropicProvider(),
-        tokenizer=tokenizer,
-        graph_runner=_Runner(driver, database),
-        repo_id=args.repo,
-    )
-
-    result = None
-    for event, result in service.stream(args.question):
-        if isinstance(event, TextEvent):
-            sys.stdout.write(event.text)
-            sys.stdout.flush()
-        elif isinstance(event, SentenceEvent) and event.badge:
-            sys.stdout.write(f"  {event.badge}\n")
-
-    print("\n\n" + result.context.report())
-    print(result.report.render())
+    if offline:
+        return HashEmbeddingProvider(), False
+    if os.environ.get("VOYAGE_API_KEY"):
+        return VoyageEmbeddingProvider(), True
     print(
-        f"TTFT {result.ttft_seconds:.2f}s · total {result.total_seconds:.2f}s · "
-        f"{result.cost.packed_tokens} packed tokens · ${result.cost.usd:.4f} "
-        f"({result.cost.model})"
+        "warning: VOYAGE_API_KEY not set; using the stand-in embedding provider. "
+        "Retrieval runs on fulltext and graph expansion only (F-009).",
+        file=sys.stderr,
     )
-    if result.retried:
-        print("(answer was refined once — §6.3)")
-    print(f"counters: {metrics.snapshot()}", file=sys.stderr)
-    return 0
+    return HashEmbeddingProvider(), False
+
+
+def _adapters() -> dict:
+    python, typescript = PythonAdapter(), TypeScriptAdapter()
+    adapters = {ext: python for ext in python.extensions}
+    adapters.update({ext: typescript for ext in typescript.extensions})
+    return adapters
 
 
 class _Runner:
@@ -200,35 +146,195 @@ class _Runner:
             return [dict(row) for row in session.run(cypher, params)]
 
 
-def _load(reader: GraphReader, repo_id: str, uid: str):
-    from adapters.base import Symbol
+@dataclass
+class Runtime:
+    """Everything one repository needs, built once and shared by CLI and server."""
 
-    props = reader.symbol(repo_id, uid)
-    if props is None:
-        return None
-    return Symbol(
-        uid=props["uid"], repo_id=repo_id, rel_path=props.get("rel_path", ""),
-        qualified_name=props.get("qualified_name", ""), name=props.get("name", ""),
-        arity=props.get("arity", 0), ordinal=props.get("ordinal", 0),
-        kind=props.get("kind", "function"), signature=props.get("signature", ""),
-        docstring=props.get("docstring"), source_code=props.get("source_code", ""),
-        enclosing_signature=props.get("enclosing_signature"),
-        used_imports=list(props.get("used_imports") or []),
-        start_line=props.get("start_line", 0), end_line=props.get("end_line", 0),
+    driver: object
+    indexer: Indexer
+    service: object
+    retriever: QueryRetriever
+
+    def close(self) -> None:
+        self.indexer.cache.close()
+        self.driver.close()
+
+
+def build_runtime(
+    repo: str,
+    root: Path,
+    *,
+    offline: bool,
+    driver=None,
+    cache_path: Path | None = None,
+    llm=None,
+) -> Runtime:
+    """Wire one repository's indexer, retriever and answering service.
+
+    `cache_path` and `llm` exist for tests: a test must neither write into the
+    developer's embedding cache nor send source to a provider.
+    """
+    from api.app import InvestigationService
+
+    driver = driver or _driver()
+    database = NEO4J_DEFAULT_DATABASE
+    apply_schema(driver, database)
+
+    writer = GraphWriter(driver, database)
+    reader = GraphReader(driver, database)
+    tokenizer = ApproxCodeTokenizer()
+    provider, meaningful = _embedding_provider(offline)
+    cache = EmbeddingCache(
+        cache_path or EMBEDDING_CACHE_PATH,
+        model=provider.name,
+        dimensions=provider.dimensions,
     )
-
-
-def _neighbor_symbol(neighbor):
-    from adapters.base import Symbol
-
-    return Symbol(
-        uid=neighbor.uid, repo_id="", rel_path=neighbor.rel_path,
-        qualified_name=neighbor.qualified_name,
-        name=neighbor.qualified_name.rsplit(".", 1)[-1],
-        arity=0, ordinal=0, kind="function",
-        signature=neighbor.signature or neighbor.qualified_name,
-        docstring=neighbor.docstring, source_code="", enclosing_signature=None,
+    indexer = Indexer(
+        writer=writer, reader=reader, cache=cache, provider=provider,
+        tokenizer=tokenizer, roots={repo: root}, adapters=_adapters(),
     )
+    runner = _Runner(driver, database)
+    retriever = QueryRetriever(
+        repo_id=repo,
+        reader=reader,
+        hybrid=HybridRetriever(backend=Neo4jSearchBackend(driver, database)),
+        expander=NeighborhoodExpander(runner=runner),
+        structural=StructuralResolver(runner=runner),
+        embed_query=(lambda text: provider.embed([text])[0]) if meaningful else None,
+        repo_root=root,
+    )
+    service = InvestigationService(
+        retriever=retriever,
+        llm=llm or AnthropicProvider(),
+        tokenizer=tokenizer,
+        graph_runner=runner,
+        repo_id=repo,
+        expander=retriever.expand,
+    )
+    return Runtime(driver=driver, indexer=indexer, service=service, retriever=retriever)
+
+
+def _print_notes(notes: dict) -> None:
+    route = notes.get("route_taken") or notes.get("route")
+    print(f"# route: {route}", file=sys.stderr)
+    if notes.get("vector_search") == "degraded":
+        print("# Semantic search degraded (embedding API unavailable)", file=sys.stderr)
+    structural = notes.get("structural")
+    if structural:
+        line = (
+            f"# {structural['rule']} of {', '.join(structural['entity']) or '?'}: "
+            f"{structural['related_total']} found, {structural['related_shown']} shown"
+        )
+        if structural.get("fallback"):
+            line += f" — {structural['fallback']}; answered semantically"
+        print(line, file=sys.stderr)
+    for frame in notes.get("frames", []):
+        print(f"# {frame['badge']:<14} {frame['frame']}", file=sys.stderr)
+
+
+def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
+    args = build_parser().parse_args(argv)
+    if not (args.question or args.reindex or args.sync or args.serve):
+        build_parser().print_help()
+        return 2
+    if not args.root.is_dir():
+        print(f"--root {args.root} is not a directory", file=sys.stderr)
+        return 2
+
+    driver = _driver()
+    try:
+        driver.verify_connectivity()
+    except Exception as exc:                       # noqa: BLE001 - report, don't mask
+        print(f"Neo4j unavailable at {NEO4J_URI}: {exc}", file=sys.stderr)
+        print("Start it with: docker compose up -d", file=sys.stderr)
+        driver.close()
+        return 1
+
+    runtime = build_runtime(args.repo, args.root.resolve(), offline=args.offline, driver=driver)
+    try:
+        return _run(args, runtime)
+    finally:
+        runtime.close()
+
+
+def _run(args, runtime: Runtime) -> int:
+    if args.reindex or args.sync:
+        started = time.perf_counter()
+        if args.sync:
+            asyncio.run(runtime.indexer.sync_project(args.repo))
+        else:
+            asyncio.run(runtime.indexer.full_reconcile(args.repo, reparse_all=True))
+        print(f"indexed {args.root} in {time.perf_counter() - started:.1f}s", file=sys.stderr)
+
+    if args.serve:
+        return _serve(args, runtime)
+
+    if not args.question:
+        return 0
+
+    if args.offline:
+        routed = runtime.service.router.route(args.question)
+        seeds, neighbors, notes = runtime.retriever(args.question, routed)
+        _print_notes(notes)
+        print(f"# Retrieval only (--offline). Model {LLM_MODEL} not called.\n")
+        for block in seeds:
+            print(f"  {block.symbol.rel_path}::{block.symbol.qualified_name}")
+        if neighbors:
+            print("\n# neighbours")
+            for block in neighbors:
+                print(f"  {block.symbol.rel_path}::{block.symbol.qualified_name}")
+        return 0
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print(
+            "warning: ANTHROPIC_API_KEY not set; synthesis will be unavailable and "
+            "the answer is retrieval-only (§9.3).",
+            file=sys.stderr,
+        )
+
+    from api.stream import SentenceEvent, TextEvent
+
+    result = None
+    for event, result in runtime.service.stream(args.question):
+        if isinstance(event, TextEvent):
+            sys.stdout.write(event.text)
+            sys.stdout.flush()
+        elif isinstance(event, SentenceEvent) and event.badge:
+            prefix = "  (amended) " if event.amends else "  "
+            sys.stdout.write(f"{prefix}{event.badge}\n")
+        elif isinstance(event, dict) and event.get("type") == "retrieval":
+            _print_notes(event)
+        elif isinstance(event, dict) and event.get("type") == "retry":
+            print(f"\n\n# Refining… ({event['reason']})\n", file=sys.stderr)
+        elif isinstance(event, dict) and event.get("type") == "synthesis_unavailable":
+            print(f"\n# Synthesis unavailable: {event['reason']}", file=sys.stderr)
+            for block in event.get("blocks", []):
+                print(f"  [{block['handle']}] {block['rel_path']}::{block['qualified_name']}")
+
+    print("\n\n" + result.context.report())
+    if result.report is not None:
+        print(result.report.render())
+    print(
+        f"TTFT {result.ttft_seconds or 0:.2f}s · total {result.total_seconds or 0:.2f}s · "
+        f"{result.cost.packed_tokens if result.cost else 0} packed tokens · "
+        f"${result.cost.usd if result.cost else 0:.4f} ({LLM_MODEL}, {EMBED_MODEL})"
+    )
+    if result.retried:
+        print("(answer was refined once — §6.3)")
+    print(f"counters: {metrics.snapshot()}", file=sys.stderr)
+    return 0
+
+
+def _serve(args, runtime: Runtime) -> int:
+    import uvicorn
+
+    from api.app import create_app
+
+    app = create_app(runtime.service, runtime.indexer, repos=[args.repo])
+    print(f"serving {args.repo} ({args.root}) on http://{args.host}:{args.port}", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
 
 
 if __name__ == "__main__":                         # pragma: no cover

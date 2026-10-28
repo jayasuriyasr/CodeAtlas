@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 import metrics
-from config import RRF_K, RRF_TOP_K
+from config import RRF_K, RRF_TOP_K, VECTOR_OVERFETCH_FACTOR
 from retrieve.tokenize import build_fulltext_query
 
 Vector = Sequence[float]
@@ -163,7 +163,7 @@ class Neo4jSearchBackend:
             WHERE node.repo_id = $repo_id
             RETURN node.uid AS uid, score ORDER BY score DESC LIMIT $k
             """,
-            fetch=k * 4,
+            fetch=k * VECTOR_OVERFETCH_FACTOR,
             vec=list(vec),
             repo_id=repo_id,
             k=k,

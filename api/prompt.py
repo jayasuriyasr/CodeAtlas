@@ -59,8 +59,20 @@ retrieved context. Additional context has been retrieved below. Answer again, \
 citing a handle for every factual claim about the codebase.\
 """
 
+#: The same instruction when nothing new could be retrieved. Telling the model
+#: "additional context has been retrieved" when the context is unchanged invites
+#: it to look for evidence that is not there — and to cite as if it had found it.
+RETRY_PREFIX_SAME_CONTEXT = """\
+A previous answer to this question was not sufficiently grounded in the \
+retrieved context. No further context could be retrieved; the context below is \
+all there is. Answer again, citing a handle for every factual claim about the \
+codebase, and say plainly what the context does not show.\
+"""
 
-def build_retry_prompt(question: str, context: PackedContext, reason: str) -> str:
+
+def build_retry_prompt(
+    question: str, context: PackedContext, reason: str, *, added_context: bool = True
+) -> str:
     """§6.3's single bounded retry.
 
     The reason is included so the second attempt is not simply the first one
@@ -68,4 +80,5 @@ def build_retry_prompt(question: str, context: PackedContext, reason: str) -> st
     identical prompt would produce an identical answer and the retry would cost
     a full generation to change nothing.
     """
-    return "\n\n".join([RETRY_PREFIX, f"# Why\n{reason}", build_prompt(question, context)])
+    prefix = RETRY_PREFIX if added_context else RETRY_PREFIX_SAME_CONTEXT
+    return "\n\n".join([prefix, f"# Why\n{reason}", build_prompt(question, context)])

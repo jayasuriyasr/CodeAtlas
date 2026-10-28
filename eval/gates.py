@@ -56,9 +56,13 @@ class Gate:
 
     def render(self) -> str:
         shown = "—" if not self.measured else f"{self.value:.3f}{self.unit}"
+        threshold = f"{self.threshold:g}{self.unit}"
+        # Provenance belongs to a number. An unmeasured row has none, and
+        # printing the report's label beside it read as "NOT MEASURED measured".
+        source = self.source if self.measured else "—"
         return (
             f"{self.name:<34} {shown:>12}  {self.direction} "
-            f"{self.threshold}{self.unit:<4}  {self.status:<12} {self.source}"
+            f"{threshold:<7} {self.status:<12} {source}"
         )
 
 

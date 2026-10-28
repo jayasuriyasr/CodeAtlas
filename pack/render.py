@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 
 from adapters.base import Symbol
-from adapters.grammars import python_parser, walk
+from adapters.grammars import python_parser, tsx_parser, walk
 from index.chunker import Tokenizer, build_context_header
 
 #: §5.4's marker. The angle brackets are the spec's; keeping them literal means
@@ -29,8 +29,27 @@ from index.chunker import Tokenizer, build_context_header
 ELISION = "# ⟨{n} lines elided⟩"
 TRUNCATION = "# ⟨truncated: {shown} of {total} lines shown⟩"
 
+#: The same markers in TypeScript's comment syntax. The ⟨…⟩ text is identical,
+#: so the prompt's instruction covers both languages.
+TS_ELISION = "{{ /* ⟨{n} lines elided⟩ */ }}"
+TS_TRUNCATION = "// ⟨truncated: {shown} of {total} lines shown⟩"
+
 _DEF_NODES = ("function_definition", "class_definition")
+_TS_DEF_NODES = (
+    "function_declaration", "generator_function_declaration", "method_definition",
+    "arrow_function", "function_expression", "function", "class_declaration",
+    "abstract_class_declaration", "class",
+)
+#: A TS body is elided only when it is a block. `x => x + 1` has an expression
+#: body; replacing it would change what the function returns.
+_TS_BLOCK_BODIES = ("statement_block", "class_body")
+_TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 _BLANK = re.compile(r"^\s*$")
+
+
+def language_of(rel_path: str) -> str:
+    """`typescript` for TS/JS sources, `python` otherwise — the two adapters."""
+    return "typescript" if rel_path.endswith(_TS_SUFFIXES) else "python"
 
 
 @dataclass(frozen=True)
@@ -50,7 +69,7 @@ class Block:
 # --------------------------------------------------------------------------
 
 
-def elide_nested_bodies(source: str) -> tuple[str, int]:
+def elide_nested_bodies(source: str, language: str = "python") -> tuple[str, int]:
     """Replace nested definition bodies with a marker. Returns (text, count).
 
     §5.4 keeps L1 because "pure greedy-truncate spends the whole seed budget on
@@ -60,17 +79,25 @@ def elide_nested_bodies(source: str) -> tuple[str, int]:
     Only the outermost nested definitions are elided — a definition inside an
     already-elided body is gone with it, and eliding it separately would corrupt
     the offsets.
+
+    `language` picks the grammar. Parsing TypeScript with the Python grammar
+    finds no definitions at all, so every TS block's L1 was silently its L0 and
+    the ladder had one rung for half the supported languages.
     """
     if not source.strip():
         return source, 0
 
+    typescript = language == "typescript"
+    def_nodes = _TS_DEF_NODES if typescript else _DEF_NODES
+    marker_format = TS_ELISION if typescript else ELISION
     data = source.encode("utf-8")
-    root = python_parser().parse(data).root_node
+    parser = tsx_parser() if typescript else python_parser()
+    root = parser.parse(data).root_node
 
     def def_ancestor_count(node) -> int:
         count, cur = 0, node.parent
         while cur is not None:
-            if cur.type in _DEF_NODES:
+            if cur.type in def_nodes:
                 count += 1
             cur = cur.parent
         return count
@@ -78,7 +105,7 @@ def elide_nested_bodies(source: str) -> tuple[str, int]:
     nested = [
         node
         for node in walk(root)
-        if node.type in _DEF_NODES and def_ancestor_count(node) >= 1
+        if node.type in def_nodes and def_ancestor_count(node) >= 1
     ]
     # Keep only the outermost: drop any node contained in another candidate.
     spans = [(n.start_byte, n.end_byte) for n in nested]
@@ -95,8 +122,12 @@ def elide_nested_bodies(source: str) -> tuple[str, int]:
         body = node.child_by_field_name("body")
         if body is None:
             continue
+        if typescript and body.type not in _TS_BLOCK_BODIES:
+            continue
         body_text = data[body.start_byte : body.end_byte].decode("utf-8", errors="replace")
         line_count = len(body_text.splitlines())
+        if typescript:
+            line_count -= 2                # `{` and `}` survive in the marker
         if line_count <= 1:
             continue                       # a one-liner costs more to mark than to keep
         replacements.append((body.start_byte, body.end_byte, line_count))
@@ -106,7 +137,7 @@ def elide_nested_bodies(source: str) -> tuple[str, int]:
 
     out = data
     for start, end, line_count in sorted(replacements, reverse=True):
-        marker = ELISION.format(n=line_count).encode("utf-8")
+        marker = marker_format.format(n=line_count).encode("utf-8")
         out = out[:start] + marker + out[end:]
 
     return out.decode("utf-8", errors="replace"), len(replacements)
@@ -131,9 +162,7 @@ def render(block: Block, level: str) -> str:
         return f"{header}\n{symbol.source_code}"
 
     if level == "elided":
-        body, count = elide_nested_bodies(symbol.source_code)
-        if count == 0:
-            return f"{header}\n{body}"     # nothing nested to elide
+        body, _count = elide_nested_bodies(symbol.source_code, language_of(symbol.rel_path))
         return f"{header}\n{body}"
 
     if level == "stub":
@@ -163,10 +192,12 @@ def truncate_marked(block: Block, budget: int, tok: Tokenizer) -> tuple[str, int
     returned cost is <= budget even in the degenerate case where nothing fits.
     """
     header = build_context_header(block.symbol)
-    body, _ = elide_nested_bodies(block.symbol.source_code)
+    language = language_of(block.symbol.rel_path)
+    truncation = TS_TRUNCATION if language == "typescript" else TRUNCATION
+    body, _ = elide_nested_bodies(block.symbol.source_code, language)
     lines = body.split("\n")
 
-    marker_cost = tok.count(TRUNCATION.format(shown=len(lines), total=len(lines))) + 1
+    marker_cost = tok.count(truncation.format(shown=len(lines), total=len(lines))) + 1
     header_cost = tok.count(header) + 1
     room = budget - header_cost - marker_cost
 
@@ -201,6 +232,6 @@ def truncate_marked(block: Block, budget: int, tok: Tokenizer) -> tuple[str, int
         kept = lines[:1]                   # the signature line, at minimum
 
     text = "\n".join(
-        [header, *kept, TRUNCATION.format(shown=len(kept), total=len(lines))]
+        [header, *kept, truncation.format(shown=len(kept), total=len(lines))]
     )
     return text, tok.count(text)

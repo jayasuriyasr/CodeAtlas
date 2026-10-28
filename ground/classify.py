@@ -142,6 +142,12 @@ def find_handles(text: str) -> list[tuple[int, int]]:
 
 _TERMINATOR_RE = re.compile(r"[.!?](?=\s|$)")
 
+#: The handles that may follow a terminator and still cite the sentence before
+#: it: "... is called here. [C3]" and "... here. [C1][C3]". Spaces and tabs
+#: only — a handle on the next line starts the next line, not this sentence.
+#: §6.1 says "one or more context handles", so a run is consumed, not one.
+TRAILING_HANDLES_RE = re.compile(r"[ \t]*\[C\d+\](?:[ \t]*\[C\d+\])*")
+
 #: Abbreviations whose full stop does not end a sentence. Short list on purpose:
 #: over-splitting turns one claim into two, which changes T2's denominator.
 _ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "Fig.", "No.")
@@ -164,8 +170,8 @@ def split_sentences(text: str) -> list[Sentence]:
         window = text[max(0, end - 6) : end]
         if any(window.endswith(abbr) for abbr in _ABBREVIATIONS):
             continue
-        # A handle may follow the terminator: "... is called here. [C3]"
-        trailing = HANDLE_RE.match(text, end + 1 if text[end : end + 1] == " " else end)
+        # Handles may follow the terminator: "... is called here. [C3]"
+        trailing = TRAILING_HANDLES_RE.match(text, end)
         if trailing is not None:
             end = trailing.end()
         boundaries.append(end)
@@ -274,20 +280,18 @@ class ClassifiedAnswer:
 
 
 def classify(text: str, known_names: frozenset[str] = frozenset()) -> ClassifiedAnswer:
-    """Segment, attach handles, and decide which sentences are claims."""
-    fences = fenced_spans(text)
+    """Segment, attach handles, and decide which sentences are claims.
+
+    Handles are read per sentence with `handles_outside_fences`, the helper the
+    streaming validator uses. A sentence never splits a fence — there is no
+    boundary inside one, and a fence's end is a boundary — so a sentence's own
+    text is enough to tell what is fenced. (Offsetting the whole answer's fence
+    spans instead was off by the sentence's stripped leading whitespace.)
+    """
     sentences = split_sentences(text)
 
     for sentence in sentences:
-        handles = tuple(
-            int(m.group(1))
-            for m in HANDLE_RE.finditer(sentence.text)
-            if not in_any(
-                [Span(f.start - sentence.start, f.end - sentence.start) for f in fences],
-                m.start(),
-            )
-        )
-        sentence.handles = handles
+        sentence.handles = handles_outside_fences(sentence.text)
         classify_sentence(sentence, known_names)
 
     return ClassifiedAnswer(text=text, sentences=sentences)

@@ -26,6 +26,16 @@ Vector = Sequence[float]
 # --------------------------------------------------------------------------
 
 
+class EmbeddingUnavailable(RuntimeError):
+    """The embedding API could not be reached or refused the request.
+
+    Its own type because §9.3 gives this failure its own behaviour — index and
+    retrieve on fulltext plus expansion, tell the user search is degraded — and
+    that behaviour must not swallow a configuration error such as a dimension
+    mismatch, which is a `ValueError` and stops everything.
+    """
+
+
 class EmbeddingProvider(Protocol):
     """S2's `.embed()` half.
 
@@ -189,3 +199,17 @@ def embed_batch(
         hits.update(dict(zip((keys[s.uid] for s in cold), fresh)))
 
     return {s.uid: hits[keys[s.uid]] for s in syms}
+
+
+def cached_vectors(batch: dict[str, ParsedFile], cache: EmbeddingCache) -> dict[str, Vector]:
+    """`embed_batch` without the provider: only what the cache already holds.
+
+    The degraded path of §9.3 when the embedding API is unreachable. Symbols
+    whose key is cold get no entry and are written without a vector.
+    """
+    syms = [s for f in batch.values() for s in f.symbols]
+    keys = {s.uid: cache_key(s) for s in syms}
+    hits = cache.get_many(sorted(set(keys.values())))
+    metrics.incr("cache.lookups", len(syms))
+    metrics.incr("cache.hits", sum(1 for s in syms if keys[s.uid] in hits))
+    return {s.uid: hits[keys[s.uid]] for s in syms if keys[s.uid] in hits}

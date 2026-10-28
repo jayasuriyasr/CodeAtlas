@@ -565,6 +565,10 @@ class PythonAdapter:
                     )
                 )
 
+        edges.extend(
+            _django_edges(collected, source, rel_path, table, module_qname,
+                          package, by_qname, owner_by_node)
+        )
         return edges
 
     def resolve_frame(self, frame: StackFrame) -> StackFrame:
@@ -610,13 +614,34 @@ def _call_edge(
     rel_path: str,
     package: str,
 ) -> Edge:
-    text = _text(callee, source)
+    return _reference_edge(
+        "CALLS", _text(callee, source), sym, by_qname, table, module_qname,
+        rel_path, package,
+    )
+
+
+def _reference_edge(
+    kind: str,
+    text: str,
+    sym: Symbol,
+    by_qname: dict[str, Symbol],
+    table: dict[str, str],
+    module_qname: str,
+    rel_path: str,
+    package: str,
+) -> Edge:
+    """An edge from `sym` to whatever the dotted name `text` refers to.
+
+    Same-file names resolve now; imported ones become an absolute hint for the
+    writer to resolve (§11.2 3b); anything else is passed through and, naming
+    nothing in the graph, is dropped there.
+    """
     local = f"{module_qname}.{text}" if module_qname else text
 
-    if local in by_qname:                 # same-file call, resolvable now
+    if local in by_qname:                 # same-file reference, resolvable now
         return Edge(
             source_uid=sym.uid,
-            kind="CALLS",
+            kind=kind,
             origin_path=rel_path,
             target_uid=by_qname[local].uid,
         )
@@ -627,7 +652,130 @@ def _call_edge(
         hint = f"{resolved}.{rest}" if rest else resolved
     else:
         hint = text
-    return Edge(source_uid=sym.uid, kind="CALLS", origin_path=rel_path, target_hint=hint)
+    return Edge(source_uid=sym.uid, kind=kind, origin_path=rel_path, target_hint=hint)
+
+
+# --------------------------------------------------------------------------
+# §3.5 — the Django framework layer
+# --------------------------------------------------------------------------
+
+#: `django.urls` route constructors. `url` is Django < 4's spelling.
+_URL_FUNCS = ("path", "re_path", "url")
+#: Fields that point at another model. Scalar fields (`CharField`, …) have no
+#: node to point at: §3.3 gives fields no symbol, so they carry no edge.
+_RELATIONAL_FIELDS = ("ForeignKey", "OneToOneField", "ManyToManyField")
+#: DRF's naming convention, the only syntactic marker a serializer has — the
+#: same footing as React's `use[A-Z]` for hooks (§3.5's other half).
+_SERIALIZER_SUFFIX = "Serializer"
+_REFERENCE_NODES = ("identifier", "attribute")
+
+
+def _positional_args(call, source: bytes) -> list:
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return []
+    return [a for a in args.named_children if a.type not in ("keyword_argument", "comment")]
+
+
+def _django_edges(
+    collected: list,
+    source: bytes,
+    rel_path: str,
+    table: dict[str, str],
+    module_qname: str,
+    package: str,
+    by_qname: dict[str, Symbol],
+    owner_by_node: dict,
+) -> list[Edge]:
+    """§3.5's Django row: `DISPATCHES_TO`, `HAS_FIELD`, `USES_SERIALIZER`.
+
+    * **`(UrlRoute)-[:DISPATCHES_TO]->(View)`, from `urls.py`.** Each
+      `path(route, view)` dispatches from the urls module — the route table
+      §3.3 has no separate node for, exactly as `route.ts`'s module is the
+      source on the TypeScript side — to `View` for `View.as_view()`, or to the
+      function for a function view. `include("app.urls")` is a string reference
+      (§12.3) and is not an edge.
+    * **`(Model)-[:HAS_FIELD]->(Field)`.** §3.3 has no field symbol, so the
+      edge is written where its far end exists: a relational field
+      (`ForeignKey(User, …)`) links the model to the model it points at. A
+      string target (`"auth.User"`) is §12.3's invisible reference. See FINDINGS
+      F-024.
+    * **`(View)-[:USES_SERIALIZER]->(Serializer)`.** From a class's
+      `serializer_class = X`, and from any function that instantiates a
+      `…Serializer` — except inside a serializer class, where that is nesting,
+      not use.
+    """
+    module_sym, root = collected[0]
+    edges: list[Edge] = []
+
+    def ref(kind: str, sym: Symbol, node) -> None:
+        edges.append(
+            _reference_edge(kind, _text(node, source), sym, by_qname, table,
+                            module_qname, rel_path, package)
+        )
+
+    if rel_path.rsplit("/", 1)[-1] == "urls.py":
+        for call in walk(root):
+            if call.type != "call":
+                continue
+            fn = call.child_by_field_name("function")
+            if fn is None or _text(fn, source).rsplit(".", 1)[-1] not in _URL_FUNCS:
+                continue
+            args = _positional_args(call, source)
+            if len(args) < 2:
+                continue
+            view = args[1]
+            if view.type == "call":               # View.as_view(**initkwargs)
+                inner = view.child_by_field_name("function")
+                attr = inner.child_by_field_name("attribute") if inner is not None else None
+                if inner is None or inner.type != "attribute" or attr is None \
+                        or _text(attr, source) != "as_view":
+                    continue                      # include(...) and friends
+                view = inner.child_by_field_name("object")
+            if view is not None and view.type in _REFERENCE_NODES:
+                ref("DISPATCHES_TO", module_sym, view)
+
+    for sym, node in collected[1:]:
+        if node.type != "class_definition":
+            continue
+        body = node.child_by_field_name("body")
+        for stmt in body.named_children if body is not None else []:
+            assign = stmt.named_children[0] if stmt.type == "expression_statement" \
+                and stmt.named_children else None
+            if assign is None or assign.type != "assignment":
+                continue
+            left = assign.child_by_field_name("left")
+            right = assign.child_by_field_name("right")
+            if left is None or right is None:
+                continue
+            if _text(left, source) == "serializer_class" and right.type in _REFERENCE_NODES:
+                ref("USES_SERIALIZER", sym, right)
+            elif right.type == "call":
+                fn = right.child_by_field_name("function")
+                if fn is not None and _text(fn, source).rsplit(".", 1)[-1] in _RELATIONAL_FIELDS:
+                    args = _positional_args(right, source)
+                    if args and args[0].type in _REFERENCE_NODES:
+                        ref("HAS_FIELD", sym, args[0])
+
+    for sym, node in collected[1:]:
+        if sym.kind != "function":
+            continue
+        parent = by_qname.get(sym.qualified_name.rsplit(".", 1)[0])
+        if parent is not None and parent.kind == "class" \
+                and parent.name.endswith(_SERIALIZER_SUFFIX):
+            continue                              # nesting, not use
+        for call in walk(node):
+            if call.type != "call" or _owner_of(call, owner_by_node) is not sym:
+                continue
+            fn = call.child_by_field_name("function")
+            if fn is not None and fn.type in _REFERENCE_NODES and \
+                    _text(fn, source).rsplit(".", 1)[-1].endswith(_SERIALIZER_SUFFIX):
+                ref("USES_SERIALIZER", sym, fn)
+
+    unique: dict[tuple, Edge] = {}
+    for edge in edges:
+        unique.setdefault((edge.source_uid, edge.kind, edge.target_uid, edge.target_hint), edge)
+    return list(unique.values())
 
 
 def _docstring(body, source: bytes) -> str | None:

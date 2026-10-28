@@ -160,6 +160,47 @@ EMBEDDING_CACHE_PATH: Path = Path(
 
 WRITE_CHUNK_SIZE: int = 1_000
 
+#: A failed flush is re-queued and retried with exponential backoff
+#: (DEBOUNCE_SECONDS * 2**attempt). After this many consecutive failures the
+#: batch stays pending without a timer; the next save re-arms it. Nothing is
+#: dropped either way — this only stops a dead database being polled forever.
+FLUSH_MAX_RETRIES: int = 3
+
+#: Texts per embedding request. Voyage accepts up to 128 inputs per call.
+EMBED_BATCH_SIZE: int = 128
+
+#: Seconds before an embedding or LLM HTTP request is abandoned.
+PROVIDER_TIMEOUT_SECONDS: float = 60.0
+
+#: Vector arm over-fetch. The vector index is shared across tenants (§9.1), so
+#: `queryNodes` is asked for this many times `k` before filtering on repo_id —
+#: otherwise a top-k can be entirely another tenant's rows.
+VECTOR_OVERFETCH_FACTOR: int = 4
+
+#: Most related symbols a STRUCTURAL traversal hands to the packer. The total is
+#: always reported; this bounds how many are loaded, not what the answer says
+#: exists — a 400-caller hub is "400 callers, 50 shown", never "50 callers".
+STRUCTURAL_RESULT_LIMIT: int = 50
+
+#: Lucene rejects a query with more than 1,024 clauses (`maxClauseCount`). A
+#: pasted file or log as a "question" tokenizes past that and would fail the
+#: whole fulltext arm, so the query keeps its first terms and drops the rest.
+FULLTEXT_MAX_TERMS: int = 256
+
+#: Sampling temperature for synthesis. §8.2: "Eval runs at temperature 0" — and
+#: a production answer that changes between identical requests is a citation
+#: the user cannot reproduce. Not a † constant: it is a correctness setting.
+#: Sent through `extra_body` (the anthropic 1.x SDK dropped the keyword; the API
+#: did not). `claude-haiku-4-5` accepts it; Opus 4.7+ reject any sampling value
+#: and Haiku/Sonnet 5.5 reject non-default ones — set None when moving to those.
+LLM_TEMPERATURE: float | None = 0.0
+
+#: TypeScript path aliases resolved when turning an import specifier into an
+#: edge target. `@/` is create-next-app's default `tsconfig` mapping to the
+#: project root. Aliases are configuration, not syntax: a repo that maps `@/`
+#: elsewhere, or uses others, is resolved only as far as this table says.
+TS_PATH_ALIASES: dict[str, str] = {"@/": ""}
+
 
 # --------------------------------------------------------------------------
 # Retrieval mechanics not named by the spec

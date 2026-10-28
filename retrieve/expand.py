@@ -26,15 +26,18 @@ from config import (
     PER_SEED_LIMIT,
 )
 
-#: §11.1 (v10.1). Multi-type patterns are legal in MATCH; MERGE does not
+#: §11.1 (v10.2). Multi-type patterns are legal in MATCH; MERGE does not
 #: accept them (probe_merge_multitype), which is why §11.2 3b is split by type.
 #: All eight allowlisted types are listed: a type the expansion does not name is
 #: a type that can be written and never read (v10.1 §0.0 R2).
+#:
+#: `CALL (seed) { … }` is the variable-scope clause. The importing-`WITH` form
+#: v10.1 carried is deprecated on 5.26 and removed in a future major (F-014);
+#: the two return identical rows (`test_expansion_scope_clause.py`).
 EXPANSION_CYPHER = """
 UNWIND $seed_uids AS seed_uid
 MATCH (seed:Symbol {uid: seed_uid, repo_id: $repo_id})
-CALL {
-    WITH seed
+CALL (seed) {
     MATCH (seed)-[r:CALLS|IMPORTS|DEFINES|DISPATCHES_TO
                   |INVOKES_HOOK|RENDERS|HAS_FIELD|USES_SERIALIZER]-(n:Symbol)
     WHERE n.uid <> seed.uid

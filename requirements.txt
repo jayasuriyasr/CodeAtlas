@@ -2,11 +2,18 @@
 #
 #   neo4j                  S6 "Direct Bolt" (§2)
 #   tree-sitter*           §3.4 chunking, §0.2 probe_tsx_grammar
+#   fastapi, uvicorn       §7 "FastAPI" + SSE — the HTTP surface (api/app.py)
+#   httpx                  fastapi.testclient, which the step 9 HTTP tests use
+#   anthropic              S2's LLM provider, decision 0002 (claude-haiku-4-5)
 #   pytest                 the plan's gate mechanism
+#
+# The embedding provider (voyage-code-2) is spoken to with the standard
+# library, so it adds nothing here.
 #
 # Pinned to a compatible-release floor, not an exact version, except where the
 # spec's own warning about version drift applies (the Neo4j server itself is
-# pinned exactly in docker-compose.yml).
+# pinned exactly in docker-compose.yml). The versions the suite last passed
+# against are recorded in PROGRESS.md.
 
 neo4j~=5.26
 pytest~=8.3
@@ -14,3 +21,8 @@ pytest~=8.3
 tree-sitter~=0.23
 tree-sitter-python~=0.23
 tree-sitter-typescript~=0.23
+
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+anthropic>=0.40

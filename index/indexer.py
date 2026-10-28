@@ -20,6 +20,7 @@ them goes through a thread — S4's `JobRunner`, whose MVP §2 names as a
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 import time
 from collections import defaultdict
@@ -30,13 +31,21 @@ from typing import Any, Iterable, Protocol, Sequence
 import metrics
 from adapters.base import ParsedFile, content_hash
 from adapters.python import PythonAdapter
-from config import BULK_THRESHOLD, DEBOUNCE_SECONDS
-from index.cache import EmbeddingCache, EmbeddingProvider, embed_batch
+from config import BULK_THRESHOLD, DEBOUNCE_SECONDS, FLUSH_MAX_RETRIES
+from index.cache import (
+    EmbeddingCache,
+    EmbeddingProvider,
+    EmbeddingUnavailable,
+    cached_vectors,
+    embed_batch,
+)
 from index.chunker import Tokenizer, chunk_file
 from index.moves import Move, Remap, collapse_chains, parse_git_renames, resolve_moves
 from retrieve.tokenize import build_search_text
 
 Vector = Sequence[float]
+
+_log = logging.getLogger("sei.indexer")
 
 
 # --------------------------------------------------------------------------
@@ -202,6 +211,8 @@ class Indexer:
         default_factory=lambda: defaultdict(asyncio.Lock), init=False
     )
     _tasks: set[asyncio.Task] = field(default_factory=set, init=False)
+    #: Consecutive failed flushes per repo, for `_requeue`'s backoff.
+    _failures: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         if not self.adapters:
@@ -228,9 +239,19 @@ class Indexer:
         await self.join()
 
     async def join(self) -> None:
-        """Await every flush already scheduled. Shutdown and tests."""
+        """Await every flush already scheduled. Shutdown and tests.
+
+        Finished tasks are removed here, not left to their done-callback. On
+        Python 3.12 `gather` over tasks that are already done completes
+        eagerly, without yielding to the loop, so the callback that discards
+        them never gets to run: `while self._tasks: await gather(...)` then
+        spins forever. Observed as a hang whenever a flush finished in the
+        instant before `aclose`.
+        """
         while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            batch = list(self._tasks)
+            await asyncio.gather(*batch, return_exceptions=True)
+            self._tasks.difference_update(task for task in batch if task.done())
 
     # -- inbound events ----------------------------------------------------
 
@@ -343,30 +364,71 @@ class Indexer:
         async with self._locks[repo]:               # per-repo, not global
             moves = await self.collect_moves(repo)  # mutates _pending; call first
             batch, self._pending[repo] = self._pending[repo], {}
-            epoch = time.time_ns()                  # one epoch per batch
+            try:
+                await self._write_batch(repo, batch, moves)
+            except Exception:                       # noqa: BLE001 - re-queued, not lost
+                self._requeue(repo, batch, moves)
+                return
+            self._failures.pop(repo, None)
 
-            # Moved-from paths stay in scope, or a remap collision leaves an
-            # orphan node and un-repointed edges uncollected (v9.1 #16).
-            batch_paths = set(batch) | {m.old_path for m in moves}
+    async def _write_batch(
+        self, repo: str, batch: dict[str, ParsedFile], moves: list[Move]
+    ) -> None:
+        epoch = time.time_ns()                      # one epoch per batch
 
-            if moves:                               # before the bulk branch
-                remaps = resolve_moves(
-                    repo, moves, batch, adapter_for=self._adapter_for
-                )
-                await asyncio.to_thread(self.writer.remap_uids, repo, remaps, epoch)
-                self._indexed[repo] -= {m.old_path for m in moves}
+        # Moved-from paths stay in scope, or a remap collision leaves an
+        # orphan node and un-repointed edges uncollected (v9.1 #16).
+        batch_paths = set(batch) | {m.old_path for m in moves}
 
-            if len(batch) > self.bulk_threshold:    # 200†
-                return await self.full_reconcile(repo, epoch=epoch)
-
-            if not batch_paths:
-                return                              # nothing to do; do not touch the graph
-
-            vectors = await self._embed(repo, batch)
-            await asyncio.to_thread(
-                self.writer.apply, repo, batch, batch_paths, vectors, epoch
+        if moves:                                   # before the bulk branch
+            remaps = resolve_moves(
+                repo, moves, batch, adapter_for=self._adapter_for
             )
-            self._indexed[repo] |= set(batch)
+            await asyncio.to_thread(self.writer.remap_uids, repo, remaps, epoch)
+            self._indexed[repo] -= {m.old_path for m in moves}
+
+        if len(batch) > self.bulk_threshold:        # 200†
+            return await self.full_reconcile(repo, epoch=epoch)
+
+        if not batch_paths:
+            return                                  # nothing to do; do not touch the graph
+
+        vectors = await self._embed(repo, batch)
+        await asyncio.to_thread(
+            self.writer.apply, repo, batch, batch_paths, vectors, epoch
+        )
+        self._indexed[repo] |= set(batch)
+
+    def _requeue(self, repo: str, batch: dict[str, ParsedFile], moves: list[Move]) -> None:
+        """§9.3: "Flush crashes mid-sequence — next flush converges."
+
+        That row is true only if the next flush *contains* the failed batch. The
+        batch was drained from `_pending` before the write, so a failure that is
+        merely logged loses it: those files stay stale until someone saves them
+        again, while the graph reports nothing wrong. So the batch goes back,
+        under anything saved since (newer content wins), with its moves, and the
+        flush is re-armed with backoff. Replay is safe because the sequence is
+        (§4.3): remaps already applied match nothing the second time.
+
+        Retries stop after `FLUSH_MAX_RETRIES`; the batch stays pending, so the
+        next save re-arms it. Nothing is ever dropped.
+        """
+        _log.exception("flush failed for repo %r; %d file(s) re-queued", repo, len(batch))
+        metrics.incr("index.flush_failed")
+        pending = self._pending[repo]
+        for path, parsed in batch.items():
+            pending.setdefault(path, parsed)
+        self._renames[repo] = list(moves) + self._renames[repo]
+
+        attempt = self._failures.get(repo, 0) + 1
+        self._failures[repo] = attempt
+        if attempt > FLUSH_MAX_RETRIES:
+            metrics.incr("index.flush_retries_exhausted")
+            return
+        try:
+            self._reset_debounce(repo, delay=self.debounce * (2 ** attempt))
+        except RuntimeError:
+            pass                                    # no running loop: next save re-arms
 
     async def _embed(self, repo: str, batch: dict[str, ParsedFile]) -> dict[str, Vector]:
         """Chunk, then embed. §4.2's `embed_batch` reads `chunk_text`.
@@ -379,24 +441,54 @@ class Indexer:
         input, and nothing else in the write path computes it — a symbol that
         reached the graph without it would be invisible to fulltext search while
         looking entirely healthy, which is T5's failure shape on the other arm.
+
+        **An unreachable embedding API does not stop indexing** (§9.3's first
+        two rows). The batch is written with whatever vectors the cache holds;
+        the rest index without one and are found by fulltext and expansion until
+        their next write — the next save of the file, or Sync Project — embeds
+        them. A symbol that already had a vector keeps it (`symbol_props` never
+        sends a null), which is §9.3's "stale", not "missing".
         """
         for parsed in batch.values():
             chunk_file(parsed, self.tokenizer)
             for sym in parsed.symbols:
                 sym.search_text = build_search_text(sym)
-        return await asyncio.to_thread(
-            embed_batch, repo, batch,
-            cache=self.cache, provider=self.provider, reader=self.reader,
-        )
+        try:
+            return await asyncio.to_thread(
+                embed_batch, repo, batch,
+                cache=self.cache, provider=self.provider, reader=self.reader,
+            )
+        except EmbeddingUnavailable:
+            _log.warning("embedding provider unavailable; indexing %r with cached vectors only", repo)
+            metrics.incr("index.embedding_unavailable")
+            return await asyncio.to_thread(cached_vectors, batch, self.cache)
 
     # -- reconcile (§4.5) --------------------------------------------------
 
-    async def full_reconcile(self, repo: str, epoch: int | None = None) -> None:
+    async def full_reconcile(
+        self, repo: str, epoch: int | None = None, *, reparse_all: bool = False
+    ) -> None:
         """§4.5. Referenced by the bulk branch, `post-checkout`, Sync and cold start.
 
         Resumable: each chunk is independently replayable under the same epoch
         (§4.3), so an interrupted reconcile resumes by re-running. Partial state
         is queryable throughout.
+
+        **Earlier chunks are replayed once every chunk is written** (v10.2 §4.5,
+        FINDINGS F-015). A chunk resolves its cross-file edges against the graph
+        as it stands when that chunk is written, so a call from chunk 1 into a
+        file chunk 3 adds — or into a symbol chunk 3 re-identifies — finds no
+        target and is dropped. Only the last chunk saw a complete graph. Replay
+        is §4.3's own guarantee put to work: same epoch, same statements, and
+        now every target exists. It costs a second local parse of each replayed
+        file and no embedding calls, since every key is already in the cache.
+
+        `reparse_all` treats every file as modified. A cross-file edge is
+        resolved only when its *source* file is written, so an unchanged caller
+        keeps whatever its last write could resolve — a callee added after it,
+        or one whose UID changed with its signature, stays unlinked however
+        often the changed side is re-indexed. Sync Project is §4.4's recovery
+        button, so it is the trigger that pays to re-resolve everything (F-016).
         """
         epoch = epoch or time.time_ns()
         root = self.roots[repo]
@@ -406,12 +498,15 @@ class Indexer:
         known = await asyncio.to_thread(self.reader.file_hashes, repo)
 
         added = [p for p in tree if p not in known]
-        modified = [p for p in tree if p in known and tree[p] != known[p]]
+        if reparse_all:
+            modified = [p for p in tree if p in known]
+        else:
+            modified = [p for p in tree if p in known and tree[p] != known[p]]
         deleted = [p for p in known if p not in tree]
 
         # Undetected-move rate (§8.3) falls out of this diff: a symbol that left
         # a deleted path and appeared at an added path with the same body_hash
-        # and qualified_name was a move no live signal caught. No stored
+        # and unqualified `name` was a move no live signal caught. No stored
         # previous-reconcile state is required.
         if added and deleted:
             metrics.incr(
@@ -419,31 +514,41 @@ class Indexer:
                 await self._count_body_hash_matches(repo, added, deleted),
             )
 
-        for chunk in _chunked(sorted(added + modified), self.bulk_threshold):
-            parsed = {}
-            for rel in chunk:
-                try:
-                    one = self._parse(repo, rel, self._read(repo, rel))
-                except OSError:
-                    metrics.incr("reconcile.unreadable")
-                    continue
-                if one is not None:
-                    parsed[rel] = one
-            if not parsed:
-                continue
-            vectors = await self._embed(repo, parsed)
-            await asyncio.to_thread(
-                self.writer.apply, repo, parsed, set(parsed), vectors, epoch
-            )
+        chunks = list(_chunked(sorted(added + modified), self.bulk_threshold))
+        for chunk in chunks:
+            await self._reconcile_chunk(repo, chunk, epoch)
 
         if deleted:                                  # steps 4-5 remove them
             await asyncio.to_thread(
                 self.writer.apply, repo, {}, set(deleted), {}, epoch
             )
 
+        if len(chunks) > 1:
+            metrics.incr("reconcile.chunks_replayed", len(chunks) - 1)
+            for chunk in chunks[:-1]:
+                await self._reconcile_chunk(repo, chunk, epoch)
+
         # One repo-wide pass beats N local ones after a bulk change.
         await asyncio.to_thread(self.writer.refresh_all_degrees, repo)
         self._indexed[repo] = set(tree)
+
+    async def _reconcile_chunk(self, repo: str, chunk: list[str], epoch: int) -> None:
+        """Parse, embed and write one reconcile chunk under `epoch`."""
+        parsed = {}
+        for rel in chunk:
+            try:
+                one = self._parse(repo, rel, self._read(repo, rel))
+            except OSError:
+                metrics.incr("reconcile.unreadable")
+                continue
+            if one is not None:
+                parsed[rel] = one
+        if not parsed:
+            return
+        vectors = await self._embed(repo, parsed)
+        await asyncio.to_thread(
+            self.writer.apply, repo, parsed, set(parsed), vectors, epoch
+        )
 
     async def _count_body_hash_matches(
         self, repo: str, added: list[str], deleted: list[str]
@@ -500,8 +605,12 @@ class Indexer:
     # -- manual triggers (§4.1) -------------------------------------------
 
     async def sync_project(self, repo: str) -> None:
-        """The Sync Project button, and the `post-checkout` hook.
+        """The Sync Project button.
 
-        The recovery path for every row in §4.4's table that says "Undetected".
+        The recovery path for every row in §4.4's table that says "Undetected",
+        and the one trigger that re-resolves every edge rather than only those
+        of changed files (`full_reconcile(reparse_all=True)`, F-016). The
+        `post-checkout` hook stays on the cheaper diff-only reconcile.
         """
-        await self.full_reconcile(repo)
+        async with self._locks[repo]:
+            await self.full_reconcile(repo, reparse_all=True)

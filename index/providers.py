@@ -22,12 +22,26 @@ that wiring lands. See FINDINGS.md F-006.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 import re
 import struct
+import time
+import urllib.error
+import urllib.request
 from typing import Iterator, Protocol, Sequence
 
-from config import EMBED_DIM, LLM_MODEL, RESERVED_OUT
+from config import (
+    EMBED_BATCH_SIZE,
+    EMBED_DIM,
+    EMBED_MODEL,
+    LLM_MODEL,
+    LLM_TEMPERATURE,
+    PROVIDER_TIMEOUT_SECONDS,
+    RESERVED_OUT,
+)
+from index.cache import EmbeddingUnavailable
 
 Vector = Sequence[float]
 
@@ -127,6 +141,112 @@ class HashEmbeddingProvider:
         return [v / norm for v in out]      # cosine similarity wants unit length
 
 
+class VoyageEmbeddingProvider:
+    """The embedding provider decision 0002 names: `voyage-code-2`, 1536 dims.
+
+    Spoken to over Voyage's REST endpoint with the standard library rather than
+    an SDK, so the production provider adds no dependency. Unexercised against
+    the live API by the suite for the same reason as `AnthropicProvider` — it
+    sends source code to a third party — and tested against a stub transport.
+
+    Failure is typed: anything that stops a batch embedding — a network error,
+    a timeout, a 4xx/5xx after retries, a malformed reply — raises
+    `EmbeddingUnavailable`, which §9.3 turns into a degraded index rather than a
+    failed one. 429 and 5xx are retried with backoff; other 4xx are not, since
+    repeating a bad request only repeats the refusal.
+
+    `input_type` is left unset for documents and queries alike. Voyage accepts
+    that, and it keeps document and query vectors in one space without the
+    seam needing a second method.
+    """
+
+    URL = "https://api.voyageai.com/v1/embeddings"
+
+    def __init__(
+        self,
+        model: str = EMBED_MODEL,
+        *,
+        api_key: str | None = None,
+        dimensions: int = EMBED_DIM,
+        batch_size: int = EMBED_BATCH_SIZE,
+        timeout: float = PROVIDER_TIMEOUT_SECONDS,
+        retries: int = 3,
+        opener=None,
+    ) -> None:
+        self.name = model
+        self.model = model
+        self.dimensions = dimensions
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.retries = retries
+        self._api_key = api_key if api_key is not None else os.environ.get("VOYAGE_API_KEY", "")
+        self._open = opener or urllib.request.urlopen
+        if not self._api_key:
+            raise ValueError("VOYAGE_API_KEY is not set")
+
+    def embed(self, texts: list[str]) -> list[Vector]:
+        out: list[Vector] = []
+        for start in range(0, len(texts), self.batch_size):
+            out.extend(self._embed_batch(texts[start : start + self.batch_size]))
+        return out
+
+    def _embed_batch(self, texts: list[str]) -> list[Vector]:
+        if not texts:
+            return []
+        # An empty string is rejected by the API; a single space embeds as
+        # "nothing here", which is what an empty chunk is.
+        body = json.dumps(
+            {"model": self.model, "input": [t if t.strip() else " " for t in texts]}
+        ).encode()
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            request = urllib.request.Request(
+                self.URL,
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with self._open(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                vectors = _parse_embeddings(payload, len(texts))
+            except urllib.error.HTTPError as exc:
+                last = exc
+                if exc.code != 429 and exc.code < 500:
+                    break                          # a bad request stays bad
+            except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                last = exc                         # network, timeout, malformed reply
+            else:
+                # A wrong dimension is configuration, not an outage: §12.11
+                # makes a model change a full re-index. Degrading would index
+                # every symbol without a vector, forever, and say "degraded".
+                for vec in vectors:
+                    if len(vec) != self.dimensions:
+                        raise ValueError(
+                            f"{self.model} returned {len(vec)} dims, expected "
+                            f"{self.dimensions}. §12.11: a model change is a full re-index."
+                        )
+                return vectors
+            if attempt < self.retries:
+                time.sleep(min(2 ** attempt, 8))
+        raise EmbeddingUnavailable(f"{self.model}: {last}") from last
+
+
+def _parse_embeddings(payload: dict, expected: int) -> list[Vector]:
+    """Voyage's `{"data": [{"index", "embedding"}]}`, in input order."""
+    try:
+        rows = sorted(payload["data"], key=lambda row: row["index"])
+        vectors = [list(map(float, row["embedding"])) for row in rows]
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"malformed embedding response: {exc!r}") from exc
+    if len(vectors) != expected:
+        raise ValueError(f"{len(vectors)} vectors for {expected} inputs")
+    return vectors
+
+
 # --------------------------------------------------------------------------
 # S2 — the LLM half
 # --------------------------------------------------------------------------
@@ -137,11 +257,17 @@ class LLMProvider(Protocol):
 
     §2 rates the LLM side of this seam as "one file" to swap, and that is
     accurate — unlike the embedding side, which is a full re-index (§12.11).
+
+    `usage`, when passed, is filled with the provider's own `input_tokens` and
+    `output_tokens` once the stream ends. It is a per-call out-parameter rather
+    than provider state because one provider serves concurrent requests.
     """
 
     name: str
 
-    def stream(self, system: str, prompt: str, *, max_tokens: int) -> Iterator[str]: ...
+    def stream(
+        self, system: str, prompt: str, *, max_tokens: int, usage: dict | None = None
+    ) -> Iterator[str]: ...
 
     def count(self, text: str) -> int: ...
 
@@ -172,14 +298,32 @@ class AnthropicProvider:
             self._client = anthropic.Anthropic()
         return self._client
 
-    def stream(self, system: str, prompt: str, *, max_tokens: int = RESERVED_OUT):
+    def stream(
+        self,
+        system: str,
+        prompt: str,
+        *,
+        max_tokens: int = RESERVED_OUT,
+        usage: dict | None = None,
+    ):
+        # anthropic 1.x removed `temperature` from the method signatures (a
+        # TypeError if passed) but not from the API, and claude-haiku-4-5
+        # still honours it. §8.2's "eval runs at temperature 0" depends on it,
+        # so it travels in `extra_body`. Newer models reject non-default
+        # sampling values: set LLM_TEMPERATURE to None for those.
+        sampling = {"temperature": LLM_TEMPERATURE} if LLM_TEMPERATURE is not None else {}
         with self._get_client().messages.stream(
             model=self.model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": prompt}],
+            **({"extra_body": sampling} if sampling else {}),
         ) as stream:
             yield from stream.text_stream
+            if usage is not None:
+                final = stream.get_final_message().usage
+                usage["input_tokens"] = final.input_tokens
+                usage["output_tokens"] = final.output_tokens
 
     def count(self, text: str) -> int:
         response = self._get_client().messages.count_tokens(
@@ -199,16 +343,37 @@ class ScriptedLLM:
 
     name = "scripted-test-llm"
 
-    def __init__(self, *answers: str, chunk: int = 7) -> None:
+    def __init__(
+        self, *answers: str, chunk: int = 7, fail_after: int | None = None,
+        usage: dict | None = None,
+    ) -> None:
         self._answers = list(answers) or [""]
         self._chunk = chunk
+        #: Raise `ConnectionError` after this many chunks of a call — the
+        #: provider dropping mid-answer, for §9.3's "LLM provider" row.
+        self._fail_after = fail_after
+        #: Usage to report, as a real provider would; None reports nothing.
+        self._usage = usage
         self.calls: list[tuple[str, str]] = []
 
-    def stream(self, system: str, prompt: str, *, max_tokens: int = RESERVED_OUT):
+    def stream(
+        self,
+        system: str,
+        prompt: str,
+        *,
+        max_tokens: int = RESERVED_OUT,
+        usage: dict | None = None,
+    ):
         self.calls.append((system, prompt))
         answer = self._answers[min(len(self.calls) - 1, len(self._answers) - 1)]
-        for start in range(0, len(answer), self._chunk):
+        for index, start in enumerate(range(0, len(answer), self._chunk)):
+            if self._fail_after is not None and index >= self._fail_after:
+                raise ConnectionError("scripted provider failure")
             yield answer[start : start + self._chunk]
+        if self._fail_after is not None and self._fail_after == 0:
+            raise ConnectionError("scripted provider failure")
+        if usage is not None and self._usage is not None:
+            usage.update(self._usage)
 
     def count(self, text: str) -> int:
         return ApproxCodeTokenizer().count(text)

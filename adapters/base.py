@@ -42,8 +42,21 @@ def normalize_rel_path(rel_path: str) -> str:
     otherwise hash to different symbols — the whole graph would fork the first
     time it was indexed from Windows and read from CI. Normalising at the
     boundary keeps `symbol_uid` itself verbatim to the spec.
+
+    Leading `./` and `/` are removed as *prefixes*, never as a character set.
+    `str.lstrip("./")` strips any run of dots and slashes, which turned
+    `.github/scripts/x.py` into `github/scripts/x.py`: a path that does not
+    exist, recorded on every symbol while the `:File` node kept the real one,
+    so §11.2 steps 4-6 never scoped onto those symbols again.
     """
-    return rel_path.replace("\\", "/").lstrip("./")
+    path = rel_path.replace("\\", "/")
+    while True:
+        if path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/"):
+            path = path[1:]
+        else:
+            return path
 
 
 def content_hash(source: bytes) -> str:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from adapters.base import Symbol
+from config import FULLTEXT_MAX_TERMS
 
 # Spec §5.3, verbatim.
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -102,6 +103,10 @@ def build_fulltext_query(query: str) -> str:
     filtering happens here or in the index (§11.3 uses
     `standard-no-stop-words`), so `if`, `not` and `for` survive to the index —
     which is the point of choosing that analyzer.
+
+    Capped at `FULLTEXT_MAX_TERMS`: past Lucene's 1,024-clause limit the index
+    raises rather than ranks, so a pasted file as a question would lose the
+    whole fulltext arm instead of its long tail.
     """
     terms = [_LUCENE_SPECIAL.sub(r"\\\1", t) for t in tokenize_query(query)]
-    return " ".join(t for t in terms if t)
+    return " ".join([t for t in terms if t][:FULLTEXT_MAX_TERMS])
