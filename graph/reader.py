@@ -4,7 +4,7 @@ Four queries, each named by the caller that needs it:
 
 | Method | Called by | For |
 |---|---|---|
-| `known_paths` | `Indexer.startup` (§4.1) | seeding `_indexed`, which decides whether Signal B runs |
+| `known_paths` | `Indexer.startup` (§4.1) | seeding `_indexed`, which decides if Signal B runs |
 | `file_hashes` | `full_reconcile` (§4.5) | the added/modified/deleted diff |
 | `body_hashes` | `embed_batch` (§4.2) | the §8.3 header-only miss share |
 | `symbols_named` | frame resolution Tier 2 (§5.1) | name match, with ambiguity as refusal |

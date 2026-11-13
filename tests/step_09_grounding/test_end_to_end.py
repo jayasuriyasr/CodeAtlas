@@ -18,7 +18,6 @@ exists. What is not: whether the model, unscripted, cites correctly.
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -176,7 +175,7 @@ def test_a_real_question_returns_a_cited_streamed_answer(service, reader):
 
     events = []
     result = None
-    for event, result in svc.stream("what charges a customer's card"):
+    for event, result in svc.stream("what charges a customer's card"):  # noqa: B007
         events.append(event)
 
     assert any(isinstance(e, TextEvent) for e in events), "nothing streamed"

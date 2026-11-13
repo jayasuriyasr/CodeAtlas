@@ -247,8 +247,8 @@ def embed_batch(
                 f"provider {provider.name} returned {len(fresh)} vectors for "
                 f"{len(cold)} inputs"
             )
-        cache.put_many(zip((keys[s.uid] for s in cold), fresh))
-        hits.update(dict(zip((keys[s.uid] for s in cold), fresh)))
+        cache.put_many(zip((keys[s.uid] for s in cold), fresh, strict=False))
+        hits.update(dict(zip((keys[s.uid] for s in cold), fresh, strict=False)))
 
     return {s.uid: hits[keys[s.uid]] for s in syms}
 

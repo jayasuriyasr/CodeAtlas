@@ -20,6 +20,7 @@ them goes through a thread — S4's `JobRunner`, whose MVP §2 names as a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import subprocess
 import time
@@ -561,10 +562,9 @@ class Indexer:
         if attempt > FLUSH_MAX_RETRIES:
             metrics.incr("index.flush_retries_exhausted")
             return
-        try:
+        # RuntimeError: no running loop; the next save re-arms the timer.
+        with contextlib.suppress(RuntimeError):
             self._reset_debounce(repo, delay=self.debounce * (2 ** attempt))
-        except RuntimeError:
-            pass                                    # no running loop: next save re-arms
 
     async def _embed(
         self, repo: str, batch: dict[str, ParsedFile], *, rewrite: bool = False

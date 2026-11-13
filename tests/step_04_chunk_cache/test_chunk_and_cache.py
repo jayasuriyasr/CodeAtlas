@@ -18,7 +18,6 @@ from index.cache import EmbeddingCache, embed_batch
 from index.chunker import (
     REDACTED,
     SCRUB_RULES_VERSION,
-    body_hash,
     build_context_header,
     cache_key,
     chunk_file,
@@ -360,7 +359,7 @@ def test_scrub_rule_version_is_in_the_header_hash():
         assert header_hash(build()) != first
     finally:
         chunker.SCRUB_RULES_VERSION = original
-    assert SCRUB_RULES_VERSION == original
+    assert original == SCRUB_RULES_VERSION
 
 
 @pytest.mark.parametrize(

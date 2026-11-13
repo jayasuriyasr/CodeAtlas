@@ -240,7 +240,8 @@ def measure_answer(runtime, question: dict, gold_uids: set[str]) -> Outcome:
 
     # §8.3: tier 0 + tier 2 resolved ÷ TS/TSX frames. Library frames were never
     # going to resolve and are not the repository's frames.
-    for frame, note in zip(result.routed.frames or (), result.notes.get("frames", [])):
+    frames = result.routed.frames or ()
+    for frame, note in zip(frames, result.notes.get("frames", []), strict=False):
         if frame.language == "python" or is_library_path(frame.file_path):
             continue
         outcome.frames_total += 1
@@ -406,7 +407,8 @@ def render(run: LocalRun) -> str:
         "",
         "# per question",
         "",
-        "| id | class | route taken | gold rank | claims | cited | retried | TTFT | total | packed |",
+        "| id | class | route taken | gold rank | claims | cited | retried | TTFT | total "
+        "| packed |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for o in run.outcomes:
@@ -424,7 +426,8 @@ def render(run: LocalRun) -> str:
         question = run.queries.get(o.id, "").strip().splitlines()
         asked = question[0] + (" …" if len(question) > 1 else "") if question else ""
         lines += [f"**{o.id}** — {asked}", ""]
-        lines += [f"> {line}" if line.strip() else ">" for line in (o.text.strip() or "(no answer)").splitlines()]
+        answer = (o.text.strip() or "(no answer)").splitlines()
+        lines += [f"> {line}" if line.strip() else ">" for line in answer]
         lines.append("")
     return "\n".join(lines) + "\n"
 

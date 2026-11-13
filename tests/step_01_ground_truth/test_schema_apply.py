@@ -88,8 +88,8 @@ def test_schema_applies_clean_on_fresh_db(fresh, probe_log):
     # Neo4j maintains built-in token lookup indexes; they are not ours.
     rec.observe("other catalogue entries", sorted(unexpected) or "none")
 
-    assert EXPECTED_CONSTRAINTS <= names
-    assert EXPECTED_INDEXES <= names
+    assert names >= EXPECTED_CONSTRAINTS
+    assert names >= EXPECTED_INDEXES
 
     # Second run: same statements, catalogue must not move.
     apply_schema(fresh.driver, fresh.name)

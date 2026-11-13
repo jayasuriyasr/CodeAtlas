@@ -20,7 +20,7 @@ from graph.reader import GraphReader
 from graph.writer import GraphWriter
 from index.indexer import walk_working_tree
 
-from .conftest import CALLEE, CALLERS, REPO, seed_move_fixture
+from .conftest import CALLEE, REPO, seed_move_fixture
 
 
 @pytest.fixture(autouse=True)

@@ -16,7 +16,6 @@ from adapters.typescript import (
     TypeScriptAdapter,
     compute_arity,
     hooks_invoked,
-    is_client_component,
     is_hook_call,
     module_qualified_name,
 )

@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Awaitable, Callable, Collection, Iterator, Sequence
 
 import metrics
-from adapters.base import Symbol
 from config import (
     AVAILABLE,
     COVERAGE_RETRY_THRESHOLD,
@@ -37,7 +36,7 @@ from ground.validate import GroundingReport, ground, plan_retry, should_retry
 from index.chunker import Tokenizer
 from pack.packer import PackedContext, pack
 from pack.render import Block
-from retrieve.router import QueryClass, QueryRouter, Routed
+from retrieve.router import QueryRouter, Routed
 
 
 @dataclass
@@ -130,7 +129,7 @@ class InvestigationService:
     def answer(self, question: str) -> AnswerResult:
         """Run the full path, collecting events rather than streaming them."""
         result = None
-        for _event, result in self._run(question):
+        for _event, result in self._run(question):  # noqa: B007 - the last one is the answer
             pass
         assert result is not None
         return result

@@ -18,3 +18,21 @@ markers = [
   "neo4j: requires a live Neo4j (docker compose up -d)",
   "expects_unresolvable: deliberately drives move.unresolvable above zero",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The fixture repositories are inputs to the tests, not project code: their
+# unused imports and long lines are part of what the adapters are tested on,
+# and the golden set points at their line numbers.
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+# Pyflakes, bugbear, pycodestyle errors and simplifications. Pylint's PLR
+# rules are left off on purpose: "magic value" fires on every expected number
+# in a test, and "too many arguments" on builders that are clearer flat.
+select = ["E", "F", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test data — sentences, source snippets, Cypher — reads better unwrapped.
+"tests/**" = ["E501"]

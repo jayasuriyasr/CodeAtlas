@@ -198,7 +198,7 @@ def resolve_moves(
             metrics.incr("move.requalify_failed")
             continue
 
-        for old_sym, new_sym in zip(as_old.symbols, parsed.symbols):
+        for old_sym, new_sym in zip(as_old.symbols, parsed.symbols, strict=False):
             # Defence in depth: identical bytes through one adapter give
             # identical symbol order, so a mismatch here means that stopped
             # being true. `name` is exempt for `:Module` symbols — a module's

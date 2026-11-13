@@ -106,7 +106,6 @@ def measure_recall_against_packed_context(corpus, graph_db) -> tuple[float, floa
     questions, meta = load_questions()
     backend = Neo4jSearchBackend(graph_db.driver, graph_db.name)
     retriever = HybridRetriever(backend=backend)
-    reader = GraphReader(graph_db.driver, graph_db.name)
     tokenizer = ApproxCodeTokenizer()
 
     by_uid = {s.uid: s for parsed in corpus.values() for s in parsed.symbols}

@@ -59,7 +59,9 @@ def _request(url: str, payload: dict | None) -> urllib.request.Request:
     )
 
 
-def installed_models(base_url: str = OLLAMA_URL, *, timeout: float = 2.0, opener=None) -> set[str] | None:
+def installed_models(
+    base_url: str = OLLAMA_URL, *, timeout: float = 2.0, opener=None
+) -> set[str] | None:
     """Names of the models the server holds, or None when it does not answer.
 
     The short timeout is the point: this decides at start-up whether the local

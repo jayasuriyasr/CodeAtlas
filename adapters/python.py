@@ -188,10 +188,7 @@ def _used_imports(
     """
     found: set[str] = set()
 
-    if skip_member_bodies:
-        subtree = _walk_skipping_member_bodies(node)
-    else:
-        subtree = walk(node)
+    subtree = _walk_skipping_member_bodies(node) if skip_member_bodies else walk(node)
 
     for child in subtree:
         if child.type != "identifier":

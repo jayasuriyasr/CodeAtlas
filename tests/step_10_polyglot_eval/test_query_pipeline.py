@@ -11,89 +11,23 @@ production `QueryRetriever` — and, at the end, through the CLI itself.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
 import metrics
-from adapters.python import PythonAdapter
-from adapters.typescript import TypeScriptAdapter
 from api.app import InvestigationService
-from graph.reader import GraphReader
-from graph.writer import GraphWriter
-from index.cache import EmbeddingCache
-from index.indexer import Indexer
-from index.providers import ApproxCodeTokenizer, HashEmbeddingProvider, ScriptedLLM
-from retrieve.expand import NeighborhoodExpander
-from retrieve.hybrid import HybridRetriever, Neo4jSearchBackend
-from retrieve.pipeline import QueryRetriever
-from retrieve.router import QueryRouter
+from index.providers import ApproxCodeTokenizer, ScriptedLLM
 from retrieve.structural import StructuralResolver, entity_terms
 
-PY_REPO = "repo_pipeline_py"
-TS_REPO = "repo_pipeline_ts"
-
-
-class Runner:
-    def __init__(self, graph_db):
-        self._db = graph_db
-
-    def run(self, query, **params):
-        return [dict(r) for r in self._db.run(query, **params)]
-
-
-def _adapters():
-    py, ts = PythonAdapter(), TypeScriptAdapter()
-    return {**{e: py for e in py.extensions}, **{e: ts for e in ts.extensions}}
-
-
-@pytest.fixture(scope="module")
-def indexed(graph_db, fixtures_dir, tmp_path_factory):
-    graph_db.run("MATCH (n) DETACH DELETE n")
-    provider = HashEmbeddingProvider()
-    cache = EmbeddingCache(tmp_path_factory.mktemp("q") / "c.sqlite", model=provider.name)
-    for repo, name in ((PY_REPO, "django_min"), (TS_REPO, "nextjs_min")):
-        indexer = Indexer(
-            writer=GraphWriter(graph_db.driver, graph_db.name),
-            reader=GraphReader(graph_db.driver, graph_db.name),
-            cache=cache, provider=provider, tokenizer=ApproxCodeTokenizer(),
-            roots={repo: fixtures_dir / "repos" / name}, adapters=_adapters(),
-        )
-        asyncio.run(indexer.full_reconcile(repo))
-    yield graph_db
-    cache.close()
-    graph_db.run("MATCH (n) DETACH DELETE n")
-
+from .pipeline_support import PY_REPO, TS_REPO, Runner, ask, names, retriever
 
 @pytest.fixture(autouse=True)
 def reset():
     metrics.reset()
     yield
     metrics.reset()
-
-
-def retriever(graph_db, repo, root=None) -> QueryRetriever:
-    runner = Runner(graph_db)
-    return QueryRetriever(
-        repo_id=repo,
-        reader=GraphReader(graph_db.driver, graph_db.name),
-        hybrid=HybridRetriever(backend=Neo4jSearchBackend(graph_db.driver, graph_db.name)),
-        expander=NeighborhoodExpander(runner=runner),
-        structural=StructuralResolver(runner=runner),
-        repo_root=root,
-    )
-
-
-def ask(graph_db, repo, question):
-    routed = QueryRouter().route(question)
-    seeds, neighbors, notes = retriever(graph_db, repo)(question, routed)
-    return routed, seeds, neighbors, notes
-
-
-def names(blocks):
-    return [b.symbol.qualified_name for b in blocks]
 
 
 # -- entity extraction ------------------------------------------------------

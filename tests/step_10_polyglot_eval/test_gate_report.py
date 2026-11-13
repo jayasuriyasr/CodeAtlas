@@ -80,7 +80,7 @@ def measure_classifier(golden: dict) -> tuple[float, float, int]:
     tp = fp = fn = 0
     total = 0
     for question in golden["questions"]:
-        for sentence, expected in zip(question["reference"], question["claims"]):
+        for sentence, expected in zip(question["reference"], question["claims"], strict=False):
             predicted = bool(classify(sentence, known).claims)
             total += 1
             if predicted and expected:

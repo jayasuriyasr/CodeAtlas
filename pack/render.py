@@ -218,7 +218,7 @@ def truncate_marked(block: Block, budget: int, tok: Tokenizer) -> tuple[str, int
 
     kept: list[str] = []
     used = 0
-    for i, line in enumerate(lines):
+    for line in lines:
         cost = tok.count(line) + 1
         if used + cost > room:
             break

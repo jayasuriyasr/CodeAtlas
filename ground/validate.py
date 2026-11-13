@@ -92,7 +92,8 @@ def _side(group: str) -> str:
 _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
     ("CALLS", re.compile(_side("a") + r"\s+(?:calls|invokes)\s+(?:the\s+)?" + _side("b")), False),
     ("CALLS", re.compile(
-        _side("a") + r"\s+is\s+(?:called|invoked)\s+(?:by|from|in)\s+(?:the\s+)?" + _side("b")), True),
+        _side("a") + r"\s+is\s+(?:called|invoked)\s+(?:by|from|in)\s+(?:the\s+)?"
+        + _side("b")), True),
     ("IMPORTS", re.compile(_side("a") + r"\s+imports\s+(?:the\s+)?" + _side("b")), False),
     ("DEFINES", re.compile(_side("a") + r"\s+defines\s+(?:the\s+)?" + _side("b")), False),
     ("DEFINES", re.compile(

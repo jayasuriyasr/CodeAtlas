@@ -86,11 +86,11 @@ def symbol_props(sym: Symbol) -> dict:
     a T5-shaped failure arriving by a different route.
     """
     props = {}
-    for field in _PROP_FIELDS:
-        value = getattr(sym, field, None)
+    for name in _PROP_FIELDS:
+        value = getattr(sym, name, None)
         if value is None:
             continue
-        props[field] = value
+        props[name] = value
     return props
 
 
@@ -121,7 +121,9 @@ def _chunked(items: Sequence, size: int):
 _REFUSED = object()
 
 
-def _c3(cls: str, classes: dict[str, list[str] | None], memo: dict, _stack: tuple = ()) -> list[str] | None:
+def _c3(
+    cls: str, classes: dict[str, list[str] | None], memo: dict, _stack: tuple = ()
+) -> list[str] | None:
     """The C3 linearisation of `cls` — Python's method resolution order.
 
     A name with no known bases (`classes[name]` is None: a library class, or
@@ -565,7 +567,7 @@ class GraphWriter:
         defined = self._exact_symbols(repo_id, lookups, batch_paths, epoch)
 
         out: list[Edge] = []
-        for edge, (cls, method) in zip(edges, wanted):
+        for edge, (cls, method) in zip(edges, wanted, strict=False):
             target, outcome = _walk_mro(orders[cls], classes, method, defined)
             if outcome == "ambiguous":
                 report.edges_ambiguous += 1

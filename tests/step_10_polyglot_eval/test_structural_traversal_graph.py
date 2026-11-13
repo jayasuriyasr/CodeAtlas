@@ -17,7 +17,7 @@ import json
 import config
 from eval.structural import measure_traversal
 
-from .test_query_pipeline import PY_REPO, ask, indexed  # noqa: F401 - fixture
+from .pipeline_support import PY_REPO, ask
 
 GOLDEN = config.REPO_ROOT / "eval" / "golden" / "golden_45.json"
 REPORT = config.REPO_ROOT / "eval" / "STRUCTURAL_REPORT.md"

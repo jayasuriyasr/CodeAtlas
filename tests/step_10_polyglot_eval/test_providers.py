@@ -15,7 +15,7 @@ import urllib.error
 import pytest
 
 from index.cache import EmbeddingUnavailable
-from index.providers import AnthropicProvider, VoyageEmbeddingProvider
+from index.providers import VoyageEmbeddingProvider
 
 
 class Response(io.BytesIO):

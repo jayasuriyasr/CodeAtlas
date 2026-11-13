@@ -238,7 +238,8 @@ class TypeScriptAdapter:
             if child.type == "export_statement":
                 exported = True
                 default = b"default" in child.text[:32]
-                inner = child.child_by_field_name("declaration") or child.child_by_field_name("value")
+                inner = (child.child_by_field_name("declaration")
+                         or child.child_by_field_name("value"))
                 if inner is None:
                     continue
                 target = inner
@@ -525,9 +526,9 @@ def _used_imports(node, source: bytes, table: dict[str, str]) -> list[str]:
         if child.type != "identifier":
             continue
         parent = child.parent
-        if parent is not None and parent.type == "member_expression":
-            if parent.child_by_field_name("property") is child:
-                continue
+        if (parent is not None and parent.type == "member_expression"
+                and parent.child_by_field_name("property") is child):
+            continue
         name = _text(child, source)
         if name in table:
             found.add(table[name])

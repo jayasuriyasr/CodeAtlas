@@ -20,8 +20,8 @@ import metrics
 from adapters.base import Symbol
 from config import AVAILABLE, MAX_SEED_FRAC, SEED_SHARE
 from index.providers import ApproxCodeTokenizer
-from pack.packer import PackedContext, pack
-from pack.render import ELISION, TRUNCATION, Block, elide_nested_bodies, render
+from pack.packer import pack
+from pack.render import Block, elide_nested_bodies, render
 
 
 @pytest.fixture(autouse=True)

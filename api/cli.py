@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -126,10 +127,9 @@ def _utf8_streams() -> None:
     sentence raised `UnicodeEncodeError` and killed the answer mid-stream.
     """
     for stream in (sys.stdout, sys.stderr):
-        try:
+        # AttributeError/ValueError: not a reconfigurable text stream.
+        with contextlib.suppress(AttributeError, ValueError):
             stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass                                  # not a reconfigurable text stream
 
 
 def _driver():
@@ -534,7 +534,7 @@ def _run(args, runtime: Runtime) -> int:
     # badges printed mid-stream landed in the middle of the following sentence.
     result = None
     verdicts: list[SentenceEvent] = []
-    for event, result in runtime.service.stream(args.question):
+    for event, result in runtime.service.stream(args.question):  # noqa: B007 - used after
         if isinstance(event, TextEvent):
             sys.stdout.write(event.text)
             sys.stdout.flush()

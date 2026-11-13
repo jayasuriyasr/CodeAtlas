@@ -19,7 +19,7 @@ import config
 import metrics
 from retrieve.frames import is_library_path
 
-from .test_query_pipeline import TS_REPO, ask, indexed, names  # noqa: F401 - fixture
+from .pipeline_support import TS_REPO, ask, names
 
 GOLDEN = config.REPO_ROOT / "eval" / "golden" / "golden_45.json"
 
@@ -109,7 +109,7 @@ def test_the_golden_ts_traces_resolve_at_the_rate_recorded(indexed):
             continue
         routed = QueryRouter().route(question["query"])
         _r, _s, _n, notes = ask(indexed, TS_REPO, question["query"])
-        for frame, note in zip(routed.frames, notes["frames"]):
+        for frame, note in zip(routed.frames, notes["frames"], strict=False):
             if is_library_path(frame.file_path):
                 continue
             total += 1
