@@ -126,6 +126,9 @@ def _is_git_repo(root: Path) -> bool:
     return bool(_run_git(root, "rev-parse", "--is-inside-work-tree").strip())
 
 
+#: The wall clock, read through one name so a test can step it back.
+_wall_clock_ns = time.time_ns
+
 #: Directories never worth indexing even when git is unavailable to say so.
 _DEFAULT_IGNORES = frozenset(
     {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache",
@@ -224,6 +227,9 @@ class Indexer:
     _failures: dict[str, int] = field(default_factory=dict, init=False)
     #: Repos whose last embedding call fell back to cached vectors only.
     _degraded: set[str] = field(default_factory=set, init=False)
+    #: The last epoch handed out per repo. Seeded from the graph on first use,
+    #: so it survives a restart as well as a clock that steps back.
+    _last_epoch: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         if not self.adapters:
@@ -400,7 +406,7 @@ class Indexer:
     async def _write_batch(
         self, repo: str, batch: dict[str, ParsedFile], moves: list[Move]
     ) -> None:
-        epoch = time.time_ns()                      # one epoch per batch
+        epoch = await self._next_epoch(repo)         # one epoch per batch
 
         # Moved-from paths stay in scope, or a remap collision leaves an
         # orphan node and un-repointed edges uncollected (v9.1 #16).
@@ -454,7 +460,8 @@ class Indexer:
         try:
             vectors = await self._embed(repo, followup)
             await asyncio.to_thread(
-                self.writer.apply, repo, followup, set(followup), vectors, time.time_ns()
+                self.writer.apply, repo, followup, set(followup), vectors,
+                await self._next_epoch(repo),
             )
         except Exception:
             # The batch itself is written; only the re-link failed. Re-writing
@@ -463,6 +470,24 @@ class Indexer:
             for rel, parsed in followup.items():
                 self._pending[repo].setdefault(rel, parsed)
             raise
+
+    async def _next_epoch(self, repo: str) -> int:
+        """A batch epoch strictly greater than every one before it.
+
+        Steps 4 and 5 delete what is older than the batch (`epoch < $epoch`),
+        so the order is all that matters, and the wall clock alone cannot give
+        it: when the clock steps back (NTP, a resumed laptop, a restored VM),
+        every new batch would be "older" than the data it replaces and nothing
+        stale would be deleted. Nanoseconds are kept so epochs stay readable as
+        times while the clock is right.
+        """
+        if repo not in self._last_epoch:
+            read = getattr(self.reader, "max_epoch", None)
+            last = await asyncio.to_thread(read, repo) if read is not None else 0
+            self._last_epoch[repo] = int(last or 0)
+        epoch = max(_wall_clock_ns(), self._last_epoch[repo] + 1)
+        self._last_epoch[repo] = epoch
+        return epoch
 
     def _requeue(self, repo: str, batch: dict[str, ParsedFile], moves: list[Move]) -> None:
         """§9.3: "Flush crashes mid-sequence — next flush converges."
@@ -575,7 +600,7 @@ class Indexer:
         often the changed side is re-indexed. Sync Project is §4.4's recovery
         button, so it is the trigger that pays to re-resolve everything (F-016).
         """
-        epoch = epoch or time.time_ns()
+        epoch = epoch or await self._next_epoch(repo)
         root = self.roots[repo]
         tree = await asyncio.to_thread(
             walk_working_tree, root, tuple(self.adapters)

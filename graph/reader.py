@@ -230,6 +230,25 @@ class GraphReader:
             )
         ]
 
+    def max_epoch(self, repo_id: str) -> int:
+        """The newest batch epoch written for a repository, or 0.
+
+        Every batch stamps its `:File` rows and symbols with its epoch, so this
+        is where the indexer resumes counting after a restart.
+        """
+        rows = self._run(
+            """
+            CALL () {
+                MATCH (f:File {repo_id: $repo_id}) RETURN max(f.epoch) AS e
+                UNION ALL
+                MATCH (s:Symbol {repo_id: $repo_id}) RETURN max(s.epoch) AS e
+            }
+            RETURN max(e) AS epoch
+            """,
+            repo_id=repo_id,
+        )
+        return int(rows[0]["epoch"] or 0) if rows else 0
+
     def stats(self, repo_id: str) -> dict[str, int]:
         """Files, symbols, relationships and embedded symbols for one repository.
 
