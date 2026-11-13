@@ -157,6 +157,30 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
   not crowded out by a large one.
 - The default local answer model is research-licensed (see above).
 
+## Running it on macOS or Linux
+
+```bash
+pip install -e .
+```
+
+```bash
+docker compose up -d neo4j
+```
+
+```bash
+sei serve ~/code/your-project
+```
+
+`sei serve` indexes the project, follows its saves and prints the console link
+(with this run's token). `sei ask <folder> "question"`, `sei index <folder>` and
+`sei check` (is Neo4j up, which local models are pulled) work the same way.
+Install [Ollama](https://ollama.com/download) and pull `qwen2.5-coder:3b` and
+`nomic-embed-text` for local answers and search.
+
+Or run the server in Docker as well: `SEI_PROJECT=<folder> SEI_API_TOKEN=<long
+random> SEI_NEO4J_PASSWORD=<password> docker compose --profile app up -d`, then
+open `http://127.0.0.1:8000/?token=<token>` (details in `docker-compose.yml`).
+
 ## Running it by hand
 
 Requires Python 3.11+ and Neo4j 5.26 Community.

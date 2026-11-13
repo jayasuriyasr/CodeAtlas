@@ -7,6 +7,35 @@ name = "sei"
 version = "0.1.0"
 description = "Software Engineering Investigation Engine — repository-level GraphRAG"
 requires-python = ">=3.11"
+# Mirrors requirements.txt, so `pip install -e .` gives a working `sei` command.
+dependencies = [
+  "neo4j~=5.26",
+  "pytest~=8.3",
+  "tree-sitter~=0.23",
+  "tree-sitter-python~=0.23",
+  "tree-sitter-typescript~=0.23",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "httpx>=0.27",
+  "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = ["ruff==0.8.4", "jedi==0.19.2"]
+
+[project.scripts]
+sei = "api.launcher:main"
+
+[tool.setuptools]
+py-modules = ["config", "metrics"]
+
+[tool.setuptools.packages.find]
+include = ["adapters*", "api*", "eval*", "graph*", "ground*", "index*", "pack*", "retrieve*"]
+
+[tool.setuptools.package-data]
+api = ["static/*.html"]
+graph = ["*.cypher"]
+eval = ["golden/*.json"]
 
 [tool.pytest.ini_options]
 # The repo root is the import root: `config`, `graph`, `adapters` are top-level

@@ -1,2 +1,4 @@
 # Development tools only; nothing here is imported at runtime.
 ruff==0.8.4
+# Language-server gold for the open-source benchmark (eval/benchmark.py).
+jedi==0.19.2

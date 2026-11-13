@@ -1,0 +1,9 @@
+.venv/
+.git/
+.sei/
+.local/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.sqlite
+eval/*.md
