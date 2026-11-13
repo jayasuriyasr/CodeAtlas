@@ -318,12 +318,12 @@ def test_probe_merge_multitype(throwaway_db, probe_log):
     rec.conclude(
         "REJECTED as expected — per-type MERGE is required"
         if raised is not None
-        else "ACCEPTED — contradicts §11.2 3b; record in FINDINGS.md before proceeding"
+        else "ACCEPTED — contradicts §11.2 3b; record it as a finding before proceeding"
     )
 
     assert raised is not None, (
         "MERGE accepted a multi-type pattern. Spec §11.2 3b and the project's "
-        "trap list both assume rejection — append to FINDINGS.md."
+        "trap list both assume rejection — record it as a finding."
     )
     assert isinstance(raised, (CypherSyntaxError, ClientError))
     assert [r["t"] for r in matched] == ["CALLS"]

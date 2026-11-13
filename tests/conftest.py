@@ -13,8 +13,8 @@ The honest version of "throwaway database" depends on the edition:
   *not* equivalent to a separate database, and it means test modules cannot run
   in parallel against one Community instance.
 
-Which mode ran is reported in the fixture and recorded in PROGRESS.md, because
-"the tests pass" means something different in each. See FINDINGS.md F-001.
+Which mode ran is reported in the fixture and in the probe report, because
+"the tests pass" means something different in each. See F-001 in DESIGN.md.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ TEST_NEO4J_URI, TEST_NEO4J_USER, TEST_NEO4J_PASSWORD = db_guard.connection_setti
 _UNREACHABLE = (
     f"NEO4J UNAVAILABLE at {TEST_NEO4J_URI} — these tests did NOT run.\n"
     f"Start the test server with:  docker compose up -d neo4j-test   (or: sei test)\n"
-    f"A gate covering a skipped test is NOT met. See PROGRESS.md."
+    f"A gate covering a skipped test is NOT met."
 )
 
 #: Set SEI_REQUIRE_NEO4J=1 to turn "no database" into a failure instead of a
@@ -69,7 +69,7 @@ def neo4j_driver() -> Driver:
 
 @dataclass(frozen=True)
 class ServerInfo:
-    """What the server actually reports. Recorded verbatim in PROGRESS.md."""
+    """What the server actually reports. Recorded verbatim in the probe report."""
 
     name: str
     version: str

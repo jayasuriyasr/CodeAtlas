@@ -35,6 +35,9 @@ from, with each citation checked as described below.
   moves keep their inbound edges; embeddings are cached so an unchanged symbol
   is never re-embedded.
 
+How it works — the architecture, the invariants it keeps, the trade-offs and
+the known limitations — is in [DESIGN.md](DESIGN.md).
+
 ## Running it on one machine (Windows)
 
 Everything runs locally: Neo4j, a local answer model and a local embedding

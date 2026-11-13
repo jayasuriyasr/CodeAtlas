@@ -3,7 +3,7 @@
 Plan §1: "one statement each, pass or fail recorded verbatim", and working rule
 4: *record actual output, never expected output*. So each probe writes what the
 server actually returned - including the exact exception text when a statement
-is rejected - into PROBE_RESULTS.md, which is the artefact PROGRESS.md quotes.
+is rejected - into PROBE_RESULTS.md, the record every later step builds on.
 
 The recorder is deliberately dumb: it stores strings produced by the probe and
 never interprets them. A probe that fails still records; the assertion runs

@@ -16,7 +16,7 @@ So the seam is real and every call site goes through it; the concrete
 production implementations are wired at step 9, alongside the API keys.
 `ApproxCodeTokenizer` is a stand-in whose error against the real tokenizer is
 **unmeasured**, which is why §5.4's ceiling arithmetic cannot be checked until
-that wiring lands. See FINDINGS.md F-006.
+that wiring lands. See F-006 in DESIGN.md.
 """
 
 from __future__ import annotations

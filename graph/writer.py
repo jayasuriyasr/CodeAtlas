@@ -278,7 +278,7 @@ class GraphWriter:
             epoch=epoch,
         )
 
-        # The :File node moves too. §11.2 omits it; see FINDINGS.md F-004.
+        # The :File node moves too. §11.2 omits it; see F-004 in DESIGN.md.
         self._run(
             """
             UNWIND $remaps AS m
@@ -370,7 +370,7 @@ class GraphWriter:
     def _upsert_files(self, repo_id: str, batch: dict[str, ParsedFile], epoch: int) -> None:
         """§3.3's `:File` node.
 
-        Not in §11.2's numbered sequence — see FINDINGS.md F-004. It has to
+        Not in §11.2's numbered sequence — see F-004 in DESIGN.md. It has to
         exist: §4.5's reconcile diff reads `reader.file_hashes(repo)`, and
         `Indexer.startup` seeds `_indexed` from `reader.known_paths(repo)`.
         Grouped with 3a because it is a write, and every write precedes every

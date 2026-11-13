@@ -42,7 +42,7 @@ SCHEMA_CYPHER: Path = REPO_ROOT / "graph" / "schema.cypher"
 # --------------------------------------------------------------------------
 
 #: Synthesis model. Recorded here so §8.2's $/query gate has a referent.
-#: Chosen in docs/decisions/0002; rates from Anthropic's card, 2026-08-27.
+#: Chosen in decision 0002 (DESIGN.md); rates from Anthropic's card, 2026-08-27.
 LLM_MODEL: str = os.environ.get("SEI_LLM_MODEL", "claude-haiku-4-5")
 LLM_INPUT_RATE_USD_PER_MTOK: float | None = 1.00
 LLM_OUTPUT_RATE_USD_PER_MTOK: float | None = 5.00

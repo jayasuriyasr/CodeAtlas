@@ -13,7 +13,7 @@
 # Pinned to a compatible-release floor, not an exact version, except where the
 # spec's own warning about version drift applies (the Neo4j server itself is
 # pinned exactly in docker-compose.yml). The versions the suite last passed
-# against are recorded in PROGRESS.md.
+# against are recorded in tests/step_01_ground_truth/PROBE_RESULTS.md.
 
 neo4j~=5.26
 pytest~=8.3

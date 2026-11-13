@@ -257,7 +257,7 @@ def split_overflow(
     there.
 
     Returns one part when the body fits; the caller decides what to do with more
-    than one — see FINDINGS.md F-005, because §3.3 gives a symbol exactly one
+    than one — see F-005 in DESIGN.md, because §3.3 gives a symbol exactly one
     `code_vec`.
     """
     whole = f"{header}\n{body}"

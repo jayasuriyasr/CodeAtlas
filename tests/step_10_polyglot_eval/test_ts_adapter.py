@@ -2,7 +2,7 @@
 
 Plan §10 frames this as the architecture's own test: "if S3 is a real seam,
 adding a language is additive. **If it is not, that is a finding about the
-architecture**". The result is recorded in PROGRESS.md rather than asserted
+architecture**". The result is recorded in the gate report rather than asserted
 here — what these tests check is that the second language obeys the same UID
 contract as the first, on the cases §3.2 uses to motivate it.
 """

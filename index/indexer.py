@@ -85,7 +85,7 @@ class RenameEvent:
     §2: "Editor integration is not a seam: it is an inbound event boundary with
     one implementation per editor." This is that boundary, transport-agnostic —
     the HTTP binding `POST /index/rename` lands with FastAPI at step 9, and the
-    VS Code extension that posts to it is a separate package (see PROGRESS.md).
+    VS Code extension that posts to it is a separate package (§10.1 in DESIGN.md).
     """
 
     repo: str
@@ -397,7 +397,7 @@ class Indexer:
           Without this, `resolve_moves` finds no `ParsedFile` and increments
           `move.unresolvable`, which §9.4 alarms on.
 
-        **Async, unlike §4.1's `def`** — see FINDINGS.md F-008. The git call is
+        **Async, unlike §4.1's `def`** — see F-008 in DESIGN.md. The git call is
         a blocking subprocess (measured at 67ms on a 400-file repository), and
         §4.1 runs it inside `_flush`, on the event loop thread. The per-repo
         mutex stops two flushes of *one* repo from overlapping; it does nothing

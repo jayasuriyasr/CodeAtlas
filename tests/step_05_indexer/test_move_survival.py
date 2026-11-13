@@ -339,7 +339,7 @@ def test_signal_b_move_preserves_edges(indexed, reader, graph_db, git_repo):
 def test_inbound_edge_survival_rate(indexed, reader, graph_db, git_repo):
     """§8.2: inbound-edge survival across a move, gated at >=0.95.
 
-    Reported as the ratio the gate is written in, so the number in PROGRESS.md
+    Reported as the ratio the gate is written in, so the number in the gate report
     is the number the gate names rather than a re-derivation of it.
     """
     before = set(helper_callers(reader, graph_db))

@@ -137,7 +137,7 @@ def test_remap_repoints_edge_origin_paths(writer, graph_db):
 def test_remap_moves_the_file_node(writer, reader, graph_db):
     """The `:File` row moves with the symbols.
 
-    §11.2 does not mention `:File` at all (FINDINGS.md F-004), but §4.1 seeds
+    §11.2 does not mention `:File` at all (F-004 in DESIGN.md), but §4.1 seeds
     `_indexed` from `known_paths`. A stale File row would make the indexer
     believe the old path is still present and skip Signal B for it.
     """

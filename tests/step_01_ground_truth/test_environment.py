@@ -101,7 +101,7 @@ def test_break_even_input_rate(probe_log):
             "config.LLM_MODEL / LLM_INPUT_RATE_USD_PER_MTOK are unset. Step 1's "
             "gate requires naming the model and version and checking §5.4's "
             "break-even against the actual rate card. This is a decision, not a "
-            "defect — see docs/decisions/0002-model-selection-and-break-even.md.",
+            "defect — see decision 0002 in DESIGN.md.",
             pytrace=False,
         )
 
@@ -114,6 +114,6 @@ def test_break_even_input_rate(probe_log):
             "clears the break-even at the full ceiling"
             if clears
             else "exceeds the break-even at the ceiling; a §5.4 lever is recorded "
-            "in docs/decisions/0002 and p50 packed tokens decides actual cost"
+            "in decision 0002 and p50 packed tokens decides actual cost"
         )
     )
