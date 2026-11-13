@@ -27,8 +27,9 @@ from typing import Iterable, Sequence
 
 from neo4j import Driver
 
+import metrics
 from adapters.base import Edge, ParsedFile, Symbol
-from config import EDGE_TYPE_ALLOWLIST, WRITE_CHUNK_SIZE
+from config import EDGE_TYPE_ALLOWLIST, MRO_MAX_DEPTH, WRITE_CHUNK_SIZE
 from index.moves import Remap
 
 Vector = Sequence[float]
@@ -67,7 +68,7 @@ _PROP_FIELDS = (
     "uid", "rel_path", "qualified_name", "name", "arity", "ordinal", "kind",
     "signature", "docstring", "source_code", "enclosing_signature",
     "search_text", "body_hash", "header_hash", "used_imports", "code_vec",
-    "start_line", "end_line", "is_client_component", "decorators",
+    "start_line", "end_line", "is_client_component", "decorators", "bases",
 )
 
 
@@ -113,6 +114,76 @@ def _chunked(items: Sequence, size: int):
 #: Sentinel for "a candidate set was found and refused" — distinct from None,
 #: which means nothing was found at all. The two feed different counters.
 _REFUSED = object()
+
+
+def _c3(cls: str, classes: dict[str, list[str] | None], memo: dict, _stack: tuple = ()) -> list[str] | None:
+    """The C3 linearisation of `cls` — Python's method resolution order.
+
+    A name with no known bases (`classes[name]` is None: a library class, or
+    one the graph has twice) is linearised as itself alone, an opaque leaf the
+    caller will refuse to walk past. Returns None for a hierarchy C3 rejects
+    (Python raises `TypeError` for the same classes) and for a cycle.
+    """
+    if cls in memo:
+        return memo[cls]
+    bases = classes.get(cls)
+    if bases is None:
+        memo[cls] = [cls]
+        return memo[cls]
+    if cls in _stack:
+        return None                                   # a cycle: no order exists
+    sequences = []
+    for base in bases:
+        order = _c3(base, classes, memo, (*_stack, cls))
+        if order is None:
+            memo[cls] = None
+            return None
+        sequences.append(list(order))
+    sequences.append(list(bases))
+
+    result = [cls]
+    while True:
+        sequences = [seq for seq in sequences if seq]
+        if not sequences:
+            break
+        for seq in sequences:
+            head = seq[0]
+            if not any(head in other[1:] for other in sequences):
+                break
+        else:
+            memo[cls] = None                          # inconsistent hierarchy
+            return None
+        result.append(head)
+        for seq in sequences:
+            if seq[0] == head:
+                seq.pop(0)
+    memo[cls] = result
+    return result
+
+
+def _walk_mro(
+    order: list[str] | None,
+    classes: dict[str, list[str] | None],
+    method: str,
+    defined: dict[str, list[str]],
+) -> tuple[str | None, str]:
+    """The uid `method` resolves to along `order`, and why, as `(uid, outcome)`.
+
+    Outcomes: "resolved"; "ambiguous" (two symbols of that name on one class);
+    "uncertain" (an opaque base came first, or no order exists); "absent"
+    (no class on the order defines it — a library method, or a typo).
+    """
+    if order is None:
+        return None, "uncertain"
+    for owner in order:
+        if classes.get(owner) is None:
+            return None, "uncertain"
+        uids = defined.get(f"{owner}.{method}", [])
+        if len(uids) > 1:
+            return None, "ambiguous"
+        if uids:
+            return uids[0], "resolved"
+    return None, "absent"
 
 
 def _hint_prefixes(hint: str) -> list[str]:
@@ -383,8 +454,10 @@ class GraphWriter:
         pending = [e for e in edges if e.target_uid is None and e.target_hint]
         already = [e for e in edges if e.target_uid is not None]
         report.edges_unresolved = len(edges) - len(already) - len(pending)
+        members = [e for e in pending if e.through_bases]
+        pending = [e for e in pending if not e.through_bases]
         if not pending:
-            return already
+            return already + self._resolve_members(repo_id, members, report, batch_paths, epoch)
 
         candidates: set[str] = set()
         for edge in pending:
@@ -413,6 +486,11 @@ class GraphWriter:
             full = edge.target_hint
             target = None
             for prefix in _hint_prefixes(full):
+                if edge.kind == "INHERITS" and prefix != full:
+                    # A base class is named exactly or not at all: trimming
+                    # `Config.Nested` to `Config` would record an inheritance
+                    # the code never states.
+                    break
                 hits = found.get(prefix)
                 if not hits:
                     continue
@@ -435,7 +513,122 @@ class GraphWriter:
                         target_uid=target,
                     )
                 )
+        out.extend(self._resolve_members(repo_id, members, report, batch_paths, epoch))
         return out
+
+    # -- member lookups: `self.method()` through the class hierarchy --------------
+
+    def _resolve_members(
+        self,
+        repo_id: str,
+        edges: list[Edge],
+        report: WriteReport,
+        batch_paths: list[str],
+        epoch: int,
+    ) -> list[Edge]:
+        """Resolve `Class.method` member lookups by the class's MRO.
+
+        The method resolution order is computed with C3 — what Python uses —
+        from each class's recorded `bases`. A base the graph cannot place (a
+        library class, or a name defined twice) is opaque: walking the order
+        and reaching it before any repository class defines the method is a
+        refusal, because that base may define the method itself. TypeScript's
+        single `extends` chain is the one-base case of the same walk.
+
+        Step 3a has already written this batch's symbols, so the graph holds
+        their new `bases`; symbols the batch is about to orphan are excluded
+        exactly as in `_resolve_edge_targets`.
+        """
+        if not edges:
+            return []
+        wanted = [(e.target_hint.rsplit(".", 1)[0], e.target_hint.rsplit(".", 1)[1])
+                  for e in edges]
+        classes = self._class_bases(repo_id, {cls for cls, _ in wanted}, batch_paths, epoch)
+        memo: dict[str, list[str] | None] = {}
+        orders = {cls: _c3(cls, classes, memo) for cls, _ in wanted}
+
+        lookups = {
+            f"{owner}.{method}"
+            for (cls, method) in wanted
+            for owner in (orders[cls] or [])
+            if classes.get(owner) is not None
+        }
+        defined = self._exact_symbols(repo_id, lookups, batch_paths, epoch)
+
+        out: list[Edge] = []
+        for edge, (cls, method) in zip(edges, wanted):
+            target, outcome = _walk_mro(orders[cls], classes, method, defined)
+            if outcome == "ambiguous":
+                report.edges_ambiguous += 1
+                metrics.incr("writer.member_ambiguous")
+            elif target is None:
+                report.edges_unresolved += 1
+                metrics.incr(f"writer.member_{outcome}")
+            else:
+                metrics.incr("writer.member_resolved")
+                out.append(Edge(source_uid=edge.source_uid, kind=edge.kind,
+                                origin_path=edge.origin_path, target_uid=target))
+        return out
+
+    def _class_bases(
+        self, repo_id: str, start: set[str], batch_paths: list[str], epoch: int
+    ) -> dict[str, list[str] | None]:
+        """`qualified_name -> bases` for every class reachable from `start`.
+
+        `None` marks a name that is not exactly one class in this repository —
+        a library base, a name with two definitions, or a hierarchy deeper
+        than `MRO_MAX_DEPTH`. The walk treats all three the same way: it stops.
+        """
+        classes: dict[str, list[str] | None] = {}
+        frontier = set(start)
+        for _ in range(MRO_MAX_DEPTH):
+            if not frontier:
+                break
+            rows = self._run(
+                """
+                UNWIND $names AS n
+                MATCH (s:Symbol {repo_id: $repo_id, name: n.name})
+                WHERE s.qualified_name = n.qn AND s.kind = 'class'
+                  AND NOT (s.origin_path IN $batch_paths AND s.epoch < $epoch)
+                RETURN n.qn AS qn, collect(coalesce(s.bases, [])) AS bases
+                """,
+                names=[{"qn": qn, "name": qn.rsplit(".", 1)[-1]} for qn in sorted(frontier)],
+                repo_id=repo_id,
+                batch_paths=batch_paths,
+                epoch=epoch,
+            )
+            found = {row["qn"]: row["bases"] for row in rows}
+            nxt: set[str] = set()
+            for qn in frontier:
+                hits = found.get(qn, [])
+                classes[qn] = list(hits[0]) if len(hits) == 1 else None
+                if classes[qn]:
+                    nxt.update(base for base in classes[qn] if base and base not in classes)
+            frontier = nxt
+        for qn in frontier:                       # deeper than the bound: opaque
+            classes.setdefault(qn, None)
+        return classes
+
+    def _exact_symbols(
+        self, repo_id: str, qualified_names: set[str], batch_paths: list[str], epoch: int
+    ) -> dict[str, list[str]]:
+        """`qualified_name -> [uid, …]` for the names that exist, orphans excluded."""
+        if not qualified_names:
+            return {}
+        rows = self._run(
+            """
+            UNWIND $names AS n
+            MATCH (s:Symbol {repo_id: $repo_id, name: n.name})
+            WHERE s.qualified_name = n.qn
+              AND NOT (s.origin_path IN $batch_paths AND s.epoch < $epoch)
+            RETURN n.qn AS qn, collect(s.uid) AS uids
+            """,
+            names=[{"qn": qn, "name": qn.rsplit(".", 1)[-1]} for qn in sorted(qualified_names)],
+            repo_id=repo_id,
+            batch_paths=batch_paths,
+            epoch=epoch,
+        )
+        return {row["qn"]: row["uids"] for row in rows}
 
     def _upsert_edges(self, edges: list[Edge], epoch: int) -> int:
         """§11.2 step 3b — ONE STATEMENT PER RELATIONSHIP TYPE.

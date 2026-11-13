@@ -15,9 +15,8 @@ no ranking:
    edge types that mean it. The relationship types come from the fixed table
    below and are compared as values, never substituted into the query text.
 
-`subclasses` has no edge type to traverse — §3.5 names no inheritance edge —
-so it resolves the entity and reports that the graph cannot answer it, which
-sends the question to SEMANTIC with the entity as context.
+`subclasses` follows `INHERITS` edges into the entity: the classes that name
+it as a base. One hop, like every other rule — direct subclasses only.
 """
 
 from __future__ import annotations
@@ -37,11 +36,12 @@ TRAVERSALS: dict[str, tuple[str, tuple[str, ...]]] = {
     "usages": (
         "in",
         ("CALLS", "IMPORTS", "INVOKES_HOOK", "RENDERS", "DISPATCHES_TO",
-         "USES_SERIALIZER", "HAS_FIELD"),
+         "USES_SERIALIZER", "HAS_FIELD", "INHERITS"),
     ),
     "definition": ("in", ("DEFINES",)),
     "imports": ("in", ("IMPORTS",)),
     "routes": ("both", ("DISPATCHES_TO", "RENDERS")),
+    "subclasses": ("in", ("INHERITS",)),
 }
 
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
@@ -211,8 +211,8 @@ class StructuralResolver:
 
         traversal = TRAVERSALS.get(rule or "")
         if traversal is None:
-            # `subclasses`: no inheritance edge exists (§3.5). The entity is
-            # still useful context for the semantic path.
+            # A rule with no edge type behind it. The entity is still useful
+            # context for the semantic path.
             metrics.incr("structural.no_traversal")
             answer.fallback = f"the graph has no edge type for {rule!r}"
             return answer

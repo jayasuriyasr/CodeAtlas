@@ -16,6 +16,8 @@ from adapters.base import (
     StackFrame,
     Symbol,
     content_hash,
+    edge_target_name,
+    member_call_edge,
     normalize_rel_path,
     symbol_uid,
 )
@@ -541,6 +543,20 @@ class PythonAdapter:
                 )
             )
 
+        # INHERITS: each class -> each declared base, in declaration order. The
+        # same list is kept on the class (`bases`) so the writer can compute
+        # the method resolution order for `self.method()` calls.
+        for sym, node in collected[1:]:
+            if node.type != "class_definition":
+                continue
+            for base in _base_nodes(node):
+                edge = _reference_edge(
+                    "INHERITS", _text(base, source), sym, by_qname, table,
+                    module_qname, rel_path, package,
+                )
+                sym.bases.append(edge_target_name(edge, by_qname))
+                edges.append(edge)
+
         # CALLS: attributed to the innermost enclosing symbol.
         #
         # Keyed on `node.id`, never Python's `id()`. py-tree-sitter builds a
@@ -557,6 +573,10 @@ class PythonAdapter:
                     continue              # belongs to a nested symbol
                 callee = call.child_by_field_name("function")
                 if callee is None:
+                    continue
+                member = _member_call(callee, source, sym, by_qname, ("self", "cls"))
+                if member is not None:
+                    edges.append(member)
                     continue
                 edges.append(
                     _call_edge(
@@ -602,6 +622,38 @@ def _owner_of(node, owner_by_node: dict[int, Symbol]) -> Symbol | None:
             return owner
         cur = cur.parent
     return None
+
+
+def _base_nodes(class_node) -> list:
+    """The base-class expressions of a `class` statement, in order.
+
+    `metaclass=…` and other keywords are not bases, and neither is a call such
+    as `with_metaclass(Meta, Base)`: what it returns is not knowable here.
+    """
+    bases = class_node.child_by_field_name("superclasses")
+    if bases is None:
+        return []
+    return [child for child in bases.named_children if child.type in _REFERENCE_NODES]
+
+
+def _member_call(
+    callee, source: bytes, sym: Symbol, by_qname: dict[str, Symbol], receivers: tuple[str, ...]
+) -> Edge | None:
+    """`self.method(...)` or `cls.method(...)` made inside a method, or None.
+
+    Only the direct form: in `self.items.append(...)` the receiver is whatever
+    `items` holds, which cannot be known without types, so that call keeps the
+    ordinary (unresolvable) hint it always had.
+    """
+    if callee.type != "attribute":
+        return None
+    obj = callee.child_by_field_name("object")
+    attr = callee.child_by_field_name("attribute")
+    if obj is None or attr is None or obj.type != "identifier":
+        return None
+    if _text(obj, source) not in receivers:
+        return None
+    return member_call_edge(sym, _text(attr, source), by_qname)
 
 
 def _call_edge(

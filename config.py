@@ -133,6 +133,7 @@ EDGE_WEIGHTS: dict[str, float] = {
     "RENDERS": 0.8,
     "USES_SERIALIZER": 0.7,
     "HAS_FIELD": 0.6,
+    "INHERITS": 0.7,                   # † a guess like the rest; untuned
     "IMPORTS": 0.4,
 }
 EDGE_WEIGHT_DEFAULT: float = 0.5       # † §11.1 coalesce fallback
@@ -153,7 +154,13 @@ EDGE_TYPE_ALLOWLIST: tuple[str, ...] = (
     "RENDERS",
     "HAS_FIELD",
     "USES_SERIALIZER",
+    "INHERITS",
 )
+
+#: How many levels of base classes the writer walks to resolve an inherited
+#: `self.method()` call. Real hierarchies are a handful deep; the bound exists so
+#: a cycle or a pathological graph cannot turn one save into an unbounded walk.
+MRO_MAX_DEPTH: int = 16
 
 #: Every allowlisted type must have a weight, or §11.1 scores it at the coalesce
 #: default while claiming to weight it. Checked here rather than discovered as a

@@ -102,6 +102,12 @@ class Symbol:
     enclosing_signature: str | None             # full, incl. bases (§3.3)
     used_imports: list[str] = field(default_factory=list)   # per-symbol (§3.4)
     decorators: list[str] = field(default_factory=list)
+    #: A class's declared base classes, in declaration order, as absolute
+    #: qualified names where the import table can say so (`models.Model` ->
+    #: `django.db.models.Model`). Empty for anything that is not a class. The
+    #: writer walks these to resolve `self.method()` to an inherited method,
+    #: and declaration order is what Python's MRO is computed from.
+    bases: list[str] = field(default_factory=list)
 
     # Position. Mutable properties, deliberately not UID inputs (§3.2).
     start_line: int = 0
@@ -141,6 +147,44 @@ class Edge:
     origin_path: str
     target_uid: str | None = None
     target_hint: str | None = None
+    #: A member lookup: `target_hint` is `Class.method` for a call made through
+    #: `self`, `cls` or `this`, and the method may be defined on the class or
+    #: inherited from one of its bases. The writer resolves it by walking the
+    #: class's method resolution order, and refuses when that walk is uncertain.
+    through_bases: bool = False
+
+
+def edge_target_name(edge: Edge, by_qname: dict[str, Symbol]) -> str:
+    """The qualified name an edge points at: the resolved symbol's, or its hint."""
+    if edge.target_uid is not None:
+        for sym in by_qname.values():
+            if sym.uid == edge.target_uid:
+                return sym.qualified_name
+    return edge.target_hint or ""
+
+
+def member_call_edge(sym: Symbol, method: str, by_qname: dict[str, Symbol]) -> Edge | None:
+    """The edge for `self.method()` / `this.method()` made inside `sym`, or None.
+
+    Shared by both adapters; each one decides what counts as a receiver and
+    hands over the method name. `sym` must be a method — its parent a class —
+    or `self` is just a parameter name and this returns None.
+
+    A method of the enclosing class defined in the same file resolves now. Any
+    other name may be inherited from a base in another file, so it becomes a
+    member lookup (`through_bases=True`) for the writer to resolve against the
+    class's method resolution order.
+    """
+    owner_qname = sym.qualified_name.rsplit(".", 1)[0]
+    owner = by_qname.get(owner_qname)
+    if owner is None or owner.kind != "class":
+        return None
+    member = f"{owner_qname}.{method}"
+    if member in by_qname:
+        return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                    target_uid=by_qname[member].uid)
+    return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                target_hint=member, through_bases=True)
 
 
 @dataclass

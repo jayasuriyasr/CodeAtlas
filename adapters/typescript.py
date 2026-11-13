@@ -26,6 +26,8 @@ from adapters.base import (
     StackFrame,
     Symbol,
     content_hash,
+    edge_target_name,
+    member_call_edge,
     normalize_rel_path,
     symbol_uid,
 )
@@ -395,6 +397,18 @@ class TypeScriptAdapter:
                      origin_path=rel_path, target_hint=target)
             )
 
+        # INHERITS: `extends` only. TypeScript has single inheritance, and an
+        # `implements` names an interface, which holds no method body for a
+        # `this.x()` call to land in.
+        for sym, node in collected[1:]:
+            base = _extends_node(node)
+            if base is None:
+                continue
+            edge = _reference_edge("INHERITS", _text(base, source), sym, by_qname,
+                                   imports, module_qname, rel_path)
+            sym.bases.append(edge_target_name(edge, by_qname))
+            edges.append(edge)
+
         owner_by_node = {node.id: sym for sym, node in collected}
         for sym, node in collected[1:]:
             for call in walk(node):
@@ -404,6 +418,10 @@ class TypeScriptAdapter:
                     continue
                 callee = call.child_by_field_name("function")
                 if callee is None:
+                    continue
+                member = _this_call(callee, source, sym, by_qname)
+                if member is not None:
+                    edges.append(member)
                     continue
                 edges.append(
                     _call_edge(callee, source, sym, by_qname, imports, module_qname, rel_path)
@@ -524,6 +542,44 @@ def _owner_of(node, owner_by_node: dict[int, Symbol]) -> Symbol | None:
             return owner
         cur = cur.parent
     return None
+
+
+def _extends_node(class_node):
+    """The expression after `extends` in a class declaration, or None."""
+    if class_node.type not in ("class_declaration", "abstract_class_declaration"):
+        return None
+    for heritage in class_node.named_children:
+        if heritage.type != "class_heritage":
+            continue
+        for clause in heritage.named_children:
+            if clause.type == "extends_clause":
+                return clause.child_by_field_name("value")
+    return None
+
+
+def _this_call(callee, source: bytes, sym: Symbol, by_qname: dict[str, Symbol]) -> Edge | None:
+    """`this.method(...)` made inside a method, or None.
+
+    `this.store.save()` is not one: its receiver is whatever `store` holds.
+    """
+    if callee.type != "member_expression":
+        return None
+    obj = callee.child_by_field_name("object")
+    prop = callee.child_by_field_name("property")
+    if obj is None or prop is None or obj.type != "this":
+        return None
+    return member_call_edge(sym, _text(prop, source), by_qname)
+
+
+def _reference_edge(kind, text, sym, by_qname, imports, module_qname, rel_path) -> Edge:
+    """An edge from `sym` to the name `text`, resolved the way calls are."""
+    local = f"{module_qname}.{text}" if module_qname else text
+    if local in by_qname:
+        return Edge(source_uid=sym.uid, kind=kind, origin_path=rel_path,
+                    target_uid=by_qname[local].uid)
+    head, _, rest = text.partition(".")
+    hint = f"{imports[head]}.{rest}" if head in imports and rest else imports.get(head, text)
+    return Edge(source_uid=sym.uid, kind=kind, origin_path=rel_path, target_hint=hint)
 
 
 def _call_edge(callee, source, sym, by_qname, imports, module_qname, rel_path) -> Edge:

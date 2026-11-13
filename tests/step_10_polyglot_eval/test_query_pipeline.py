@@ -153,11 +153,26 @@ def test_an_unknown_entity_falls_back_to_semantic_and_says_so(indexed):
     assert "no symbol" in notes["structural"]["fallback"]
 
 
-def test_subclasses_has_no_edge_and_falls_back_with_the_entity_first(indexed):
-    _r, seeds, _n, notes = ask(indexed, PY_REPO, "subclasses of `TimestampMixin`")
-    assert notes["route_taken"] == "SEMANTIC"
-    assert "no edge type" in notes["structural"]["fallback"]
+def test_an_inherited_method_has_its_callers(indexed):
+    """Golden S14. `Subscription.cancel` reaches `soft_delete` through
+    `self`, and the method is defined on a mixin in another file."""
+    _r, _seeds, _n, notes = ask(indexed, PY_REPO, "callers of `soft_delete`")
+    assert notes["route_taken"] == "STRUCTURAL"
+    related = {r["qualified_name"] for r in notes["structural"]["related"]}
+    assert "billing.models.Subscription.cancel" in related
+
+
+def test_subclasses_are_answered_by_the_inherits_edges(indexed):
+    """This used to fall back to search: the graph had no inheritance edge,
+    and the test pinned that gap. With INHERITS the traversal is the answer."""
+    _r, seeds, stubs, notes = ask(indexed, PY_REPO, "subclasses of `TimestampMixin`")
+    assert notes["route_taken"] == "STRUCTURAL"
     assert names(seeds)[0] == "common.mixins.TimestampMixin"
+    related = {r["qualified_name"] for r in notes["structural"]["related"]}
+    assert related == {
+        "authx.models.ApiToken", "authx.models.User",
+        "billing.models.Plan", "billing.models.Subscription",
+    }
 
 
 def test_a_name_shared_by_many_symbols_is_refused(indexed, graph_db):
