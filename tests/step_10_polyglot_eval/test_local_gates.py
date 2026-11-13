@@ -166,6 +166,10 @@ def test_the_whole_measurement_runs_over_both_fixtures(runtimes):
         o.id for o in traversed if o.gold_rank is None
     ]
 
+    # The traversal, scored against expected_related, is part of the run.
+    assert run.traversal is not None and len(run.traversal.results) == 15
+    assert "structural traversal against expected_related" in render(run)
+
     # §8.3, through the real resolver: F-027's three of nine.
     assert run.ts_frames == (3, 9)
 

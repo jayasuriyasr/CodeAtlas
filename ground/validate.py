@@ -61,28 +61,54 @@ def validate_handles(
 # T3 — relational claims
 # --------------------------------------------------------------------------
 
-_BACKTICKED = r"`([A-Za-z_][\w.]*)`"
+_IDENT = r"[A-Za-z_][\w.]*"
+#: What a model puts after a name: "the `issue_token` function".
+_NOUN = r"(?:\s+(?:function|method|class|view|model|module|helper|component|hook))?"
+#: "… in `authx/views.py`" — a file, which names no symbol and is skipped.
+_FILE = r"(?:\s+(?:in|from)\s+`[\w./-]+\.(?:py|pyi|ts|tsx|js|jsx)`)?"
 
-#: Relation phrasings, mapped to the §11.2 allowlist. Deliberately narrow: a
-#: verb list that tried to cover every phrasing would extract triples from
-#: sentences that assert nothing, and §6.2's RelationPrec denominator would
-#: then be full of things the model never claimed.
+
+def _side(group: str) -> str:
+    """A backticked name as a model writes it in a relation, captured as `group`.
+
+    "`post` method of the `LoginView` class" names `LoginView.post`: the owner
+    is captured as `<group>_owner` and joined on. A file location is skipped.
+    """
+    return (
+        rf"`(?P<{group}>{_IDENT})`" + _NOUN
+        + rf"(?:\s+(?:of|on|in)\s+(?:the\s+)?`(?P<{group}_owner>{_IDENT})`{_NOUN})?"
+        + _FILE
+    )
+
+
+#: Relation phrasings, mapped to the §11.2 allowlist. Still deliberately
+#: narrow: a verb list that tried to cover every phrasing would extract triples
+#: from sentences that assert nothing, and §6.2's RelationPrec denominator
+#: would then be full of things the model never claimed. Widened only to the
+#: forms the local model was measured writing — a noun after a name ("the
+#: `charge_card` function"), an owner ("`post` method of the `LoginView`
+#: class"), a file location — because without them T3 found no relation at all
+#: in 45 real answers. "uses" is still not a call.
 _RELATION_PATTERNS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
-    ("CALLS", re.compile(_BACKTICKED + r"\s+(?:calls|invokes)\s+" + _BACKTICKED), False),
-    ("CALLS", re.compile(_BACKTICKED + r"\s+is\s+called\s+by\s+" + _BACKTICKED), True),
-    ("IMPORTS", re.compile(_BACKTICKED + r"\s+imports\s+" + _BACKTICKED), False),
-    ("DEFINES", re.compile(_BACKTICKED + r"\s+defines\s+" + _BACKTICKED), False),
-    (
-        "DEFINES",
-        re.compile(_BACKTICKED + r"\s+is\s+defined\s+(?:in|by)\s+" + _BACKTICKED),
-        True,
-    ),
-    (
-        "DISPATCHES_TO",
-        re.compile(_BACKTICKED + r"\s+(?:dispatches to|routes to)\s+" + _BACKTICKED),
-        False,
-    ),
+    ("CALLS", re.compile(_side("a") + r"\s+(?:calls|invokes)\s+(?:the\s+)?" + _side("b")), False),
+    ("CALLS", re.compile(
+        _side("a") + r"\s+is\s+(?:called|invoked)\s+(?:by|from|in)\s+(?:the\s+)?" + _side("b")), True),
+    ("IMPORTS", re.compile(_side("a") + r"\s+imports\s+(?:the\s+)?" + _side("b")), False),
+    ("DEFINES", re.compile(_side("a") + r"\s+defines\s+(?:the\s+)?" + _side("b")), False),
+    ("DEFINES", re.compile(
+        _side("a") + r"\s+is\s+defined\s+(?:in|by)\s+(?:the\s+)?" + _side("b")), True),
+    ("DISPATCHES_TO", re.compile(
+        _side("a") + r"\s+(?:dispatches to|routes to)\s+(?:the\s+)?" + _side("b")), False),
+    ("INHERITS", re.compile(
+        _side("a") + r"\s+(?:inherits\s+from|extends|is\s+a\s+subclass\s+of)\s+(?:the\s+)?"
+        + _side("b")), False),
 )
+
+
+def _named(match: re.Match[str], group: str) -> str:
+    owner = match.group(f"{group}_owner")
+    name = match.group(group)
+    return f"{owner}.{name}" if owner else name
 
 
 @dataclass(frozen=True)
@@ -137,7 +163,7 @@ def extract_relation_claims(answer: ClassifiedAnswer) -> list[RelationClaim]:
             continue
         for relation, pattern, inverted in _RELATION_PATTERNS:
             for match in pattern.finditer(sentence.text):
-                left, right = match.group(1), match.group(2)
+                left, right = _named(match, "a"), _named(match, "b")
                 subject, obj = (right, left) if inverted else (left, right)
                 claims.append(
                     RelationClaim(

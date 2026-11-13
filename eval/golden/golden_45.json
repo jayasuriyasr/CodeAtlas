@@ -5,6 +5,7 @@
   },
   "stage": "packed",
   "note": "§8.1's golden set: 45 questions, 15 per router class. Gold is named by (rel_path, qualified_name) and resolved to UIDs at run time — a UID is a truncated sha1 over repo_id and is unreviewable in a diff. Recall is measured against PACKED context, not retrieved candidates: §8.1 is explicit that 'a gold node retrieved and then dropped by the packer never reached the model'. Each question carries a reference answer split into sentences, with `claims` marking which of them §6.1 counts as claim sentences — that is what makes the T2 classifier's precision and recall measurable rather than assumed.",
+  "expected_related_note": "Each STRUCTURAL question also carries `expected_related`: the full answer the traversal should return, read off the fixture's source (and cross-checked with Python's ast module for direct calls), never off SEI's own graph. `gold` alone is the entity the question names, so Recall@10 on STRUCTURAL measures entity lookup; `expected_related` is what measures the traversal. Rules: callers and callees are repository functions, methods and classes the code actually invokes (constructing a class calls it; `Model.objects.filter(...)` calls Django's manager, not the model; `obj.method()` on a local variable counts, though SEI cannot resolve it); usages are every symbol that references the entity, including the modules that import it; definition is the module that defines it.",
   "composition": {
     "STRUCTURAL": "≥4 on hub-adjacent symbols, exercising the degree cutoff",
     "SEMANTIC": "≥5 on undocumented or poorly-named symbols (§12.5)",
@@ -15,6 +16,7 @@
       "id": "S01", "class": "STRUCTURAL", "query": "what calls audit_event",
       "hub_adjacent": true,
       "gold": [["common/utils.py", "common.utils.audit_event"]],
+      "expected_related": [["authx/services.py", "authx.services.issue_token"], ["authx/views.py", "authx.views.LoginView.post"], ["authx/views.py", "authx.views.ProfileView.patch"], ["authx/views.py", "authx.views.TokenRevokeView.delete"], ["billing/tasks.py", "billing.tasks.charge_card"], ["billing/views.py", "billing.views.SubscriptionView.post"]],
       "reference": ["`audit_event` is called from the auth views, the auth services and the billing views.", "It emits one structured log line per call."],
       "claims": [true, true]
     },
@@ -22,6 +24,7 @@
       "id": "S02", "class": "STRUCTURAL", "query": "who calls charge_card",
       "hub_adjacent": true,
       "gold": [["billing/tasks.py", "billing.tasks.charge_card"], ["billing/views.py", "billing.views.SubscriptionView.post"]],
+      "expected_related": [["billing/tasks.py", "billing.tasks.run_monthly_billing"], ["billing/tasks.py", "billing.tasks.retry_failed"], ["billing/views.py", "billing.views.SubscriptionView.post"]],
       "reference": ["`SubscriptionView.post` calls `charge_card` [C1].", "`run_monthly_billing` also calls it for each active subscription [C2]."],
       "claims": [true, true]
     },
@@ -29,6 +32,7 @@
       "id": "S03", "class": "STRUCTURAL", "query": "callers of constant_time_equals",
       "hub_adjacent": true,
       "gold": [["common/utils.py", "common.utils.constant_time_equals"]],
+      "expected_related": [["authx/services.py", "authx.services.verify_credentials"]],
       "reference": ["`verify_credentials` is the only caller of `constant_time_equals`."],
       "claims": [true]
     },
@@ -36,18 +40,21 @@
       "id": "S04", "class": "STRUCTURAL", "query": "where is chunked used",
       "hub_adjacent": true,
       "gold": [["common/utils.py", "common.utils.chunked"]],
+      "expected_related": [["billing/tasks.py", "billing.tasks.run_monthly_billing"], ["billing/tasks.py", "billing.tasks"]],
       "reference": ["`run_monthly_billing` uses `chunked` to batch active subscriptions."],
       "claims": [true]
     },
     {
       "id": "S05", "class": "STRUCTURAL", "query": "what does LoginView.post call",
       "gold": [["authx/views.py", "authx.views.LoginView.post"]],
+      "expected_related": [["authx/serializers.py", "authx.serializers.LoginSerializer"], ["authx/services.py", "authx.services.verify_credentials"], ["common/utils.py", "common.utils.mask_email"], ["authx/services.py", "authx.services.issue_token"], ["common/utils.py", "common.utils.audit_event"]],
       "reference": ["`LoginView.post` calls `verify_credentials`, `issue_token` and `audit_event`."],
       "claims": [true]
     },
     {
       "id": "S06", "class": "STRUCTURAL", "query": "where is issue_token defined",
       "gold": [["authx/services.py", "authx.services.issue_token"]],
+      "expected_related": [["authx/services.py", "authx.services"]],
       "reference": ["`issue_token` is defined in `authx.services`."],
       "claims": [true]
     },
@@ -55,54 +62,63 @@
       "id": "S07", "class": "STRUCTURAL", "query": "subclasses of TimestampMixin",
       "hub_adjacent": true,
       "gold": [["common/mixins.py", "common.mixins.TimestampMixin"]],
+      "expected_related": [["authx/models.py", "authx.models.User"], ["authx/models.py", "authx.models.ApiToken"], ["billing/models.py", "billing.models.Plan"], ["billing/models.py", "billing.models.Subscription"]],
       "reference": ["`User`, `ApiToken`, `Plan` and `Subscription` all extend `TimestampMixin`."],
       "claims": [true]
     },
     {
       "id": "S08", "class": "STRUCTURAL", "query": "what imports common.utils",
       "gold": [["common/utils.py", "common.utils"]],
+      "expected_related": [["authx/services.py", "authx.services"], ["authx/views.py", "authx.views"], ["billing/tasks.py", "billing.tasks"], ["billing/views.py", "billing.views"]],
       "reference": ["The auth views, auth services, billing views and billing tasks all import `common.utils`."],
       "claims": [true]
     },
     {
       "id": "S09", "class": "STRUCTURAL", "query": "which view handles the login route",
       "gold": [["authx/urls.py", "authx.urls"], ["authx/views.py", "authx.views.LoginView"]],
+      "expected_related": [["authx/views.py", "authx.views.LoginView"]],
       "reference": ["The `login` route dispatches to `LoginView`."],
       "claims": [true]
     },
     {
       "id": "S10", "class": "STRUCTURAL", "query": "usages of ApiToken",
       "gold": [["authx/models.py", "authx.models.ApiToken"]],
+      "expected_related": [["authx/services.py", "authx.services.issue_token"], ["authx/services.py", "authx.services.revoke_all"], ["authx/views.py", "authx.views.TokenRevokeView.delete"], ["authx/serializers.py", "authx.serializers.ApiTokenSerializer"], ["authx/services.py", "authx.services"], ["authx/views.py", "authx.views"], ["authx/serializers.py", "authx.serializers"]],
       "reference": ["`ApiToken` is used by `issue_token`, `revoke_all` and `TokenRevokeView.delete`."],
       "claims": [true]
     },
     {
       "id": "S11", "class": "STRUCTURAL", "query": "what calls mask_email",
       "gold": [["common/utils.py", "common.utils.mask_email"]],
+      "expected_related": [["authx/views.py", "authx.views.LoginView.post"]],
       "reference": ["`LoginView.post` calls `mask_email` when a login fails."],
       "claims": [true]
     },
     {
       "id": "S12", "class": "STRUCTURAL", "query": "where is Subscription defined",
       "gold": [["billing/models.py", "billing.models.Subscription"]],
+      "expected_related": [["billing/models.py", "billing.models"]],
       "reference": ["`Subscription` is defined in `billing.models`."],
       "claims": [true]
     },
     {
       "id": "S13", "class": "STRUCTURAL", "query": "what does run_monthly_billing call",
       "gold": [["billing/tasks.py", "billing.tasks.run_monthly_billing"]],
+      "expected_related": [["common/utils.py", "common.utils.chunked"], ["billing/tasks.py", "billing.tasks.charge_card"], ["billing/models.py", "billing.models.Subscription.monthly_total"]],
       "reference": ["`run_monthly_billing` calls `chunked` and `charge_card`."],
       "claims": [true]
     },
     {
       "id": "S14", "class": "STRUCTURAL", "query": "callers of soft_delete",
       "gold": [["common/mixins.py", "common.mixins.SoftDeleteMixin.soft_delete"]],
+      "expected_related": [["billing/models.py", "billing.models.Subscription.cancel"]],
       "reference": ["`Subscription.cancel` calls `soft_delete`."],
       "claims": [true]
     },
     {
       "id": "S15", "class": "STRUCTURAL", "query": "what calls revoke",
       "gold": [["authx/models.py", "authx.models.ApiToken.revoke"]],
+      "expected_related": [["authx/services.py", "authx.services.revoke_all"], ["authx/views.py", "authx.views.TokenRevokeView.delete"]],
       "reference": ["`revoke_all` and `TokenRevokeView.delete` both call `revoke`."],
       "claims": [true]
     },

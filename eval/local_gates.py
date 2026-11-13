@@ -37,6 +37,7 @@ import config
 import metrics
 from eval.gates import GateReport, build_decision_metrics, build_gates, percentile
 from eval.harness import EvalHarness, EvalReport, Question
+from eval.structural import TraversalReport, measure_traversal
 from pack.packer import pack
 from retrieve.frames import is_library_path
 
@@ -103,6 +104,8 @@ class LocalRun:
     #: Recall against packed context, retrieval only: the vector arm off and on.
     recall_fulltext: EvalReport | None = None
     recall_hybrid: EvalReport | None = None
+    #: The STRUCTURAL traversal against `expected_related` (eval/structural.py).
+    traversal: TraversalReport | None = None
     llm: str = ""
     embedder: str = ""
     context_budget: int = 0
@@ -180,6 +183,12 @@ def _packed_uids(runtime, query: str, *, vectors: bool) -> list[str]:
     context = pack(seeds, neighbors, runtime.service.tokenizer,
                    available=runtime.service.available)
     return [p.uid for p in context.blocks]
+
+
+def _notes(runtime, query: str) -> dict:
+    """The retriever's notes for `query` — the traversal's answer, no model."""
+    routed = runtime.service.router.route(query)
+    return runtime.retriever(query, routed)[2]
 
 
 def measure_recall(runtimes: dict, golden: dict, *, vectors: bool) -> EvalReport:
@@ -262,6 +271,8 @@ def measure(runtimes: dict, golden: dict, *, progress=None) -> LocalRun:
     )
     run.recall_fulltext = measure_recall(runtimes, golden, vectors=False)
     run.recall_hybrid = measure_recall(runtimes, golden, vectors=True)
+    run.traversal = measure_traversal(golden["questions"], lambda query: _notes(
+        runtimes["python"], query))
     gold = {r.question.id: r.gold_uids for r in run.recall_hybrid.results}
     run.queries = {q["id"]: q["query"] for q in golden["questions"]}
 
@@ -370,6 +381,9 @@ def render(run: LocalRun) -> str:
             f"MRR {recall.mrr():.3f} · per class @10: {per_class} · missed: {missed}"
         )
 
+    if run.traversal is not None:
+        lines += ["", "# structural traversal against expected_related", "",
+                  run.traversal.render()]
     lines += ["", "# by router class", ""]
     for cls in sorted({o.router_class for o in run.outcomes}):
         rows = [o for o in answered if o.router_class == cls]

@@ -14,3 +14,4 @@ eval/GATE_REPORT_no_database.md
 tests/step_01_ground_truth/PROBE_RESULTS.md
 tests/step_01_ground_truth/probe_results.json
 tests/step_06_retrieval/RECALL_BASELINE.md
+eval/STRUCTURAL_REPORT.md
