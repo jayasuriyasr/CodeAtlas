@@ -42,22 +42,48 @@ class Tokenizer(Protocol):
 
 REDACTED = "«redacted»"
 
-#: Known key shapes. Deliberately narrow: §12.0 is honest that this "will not
-#: catch a credential shaped like ordinary text, one assembled from parts, or a
-#: proprietary algorithm". Widening the patterns does not change that, and a
-#: pattern that fires on ordinary code costs retrieval signal for nothing.
+#: Known key shapes, most specific first. Deliberately narrow: §12.0 is honest
+#: that this "will not catch a credential shaped like ordinary text, one
+#: assembled from parts, or a proprietary algorithm". Widening the patterns
+#: does not change that, and a pattern that fires on ordinary code costs
+#: retrieval signal for nothing — `test_code_that_merely_mentions_a_secret`
+#: holds the line on that side.
+#:
+#: A pattern with a `secret` group redacts only that group, so a database URL
+#: keeps its scheme, user and host and stays searchable.
+_NOT_KEY_CHAR = r"(?<![A-Za-z0-9_-])"
+#: Names that announce a secret: `SECRET_KEY`, `DB_PASSWORD`, `api_key`, `pwd`.
+_SECRET_NAME = (r"[A-Za-z0-9_]*(?:secret|passw(?:or)?d|pwd|token|api[_-]?key|"
+                r"private[_-]?key|access[_-]?key|credential)[A-Za-z0-9_]*")
 SCRUB_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
-    ("stripe_key", re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b")),
-    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
     (
         "private_key",
         re.compile(
             r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----.*?"
             r"-----END (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
             re.DOTALL,
+        ),
+    ),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("stripe_key", re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
+    # Before the OpenAI shape, which `sk-ant-…` would also match.
+    ("anthropic_key", re.compile(_NOT_KEY_CHAR + r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    ("openai_key", re.compile(_NOT_KEY_CHAR + r"sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}")),
+    # Django's generated default, often left as `os.environ.get(…, "<it>")`.
+    ("django_secret_key", re.compile(r"django-insecure-[^'\"\s]{10,}")),
+    # `scheme://user:password@host` — only the password goes.
+    ("url_password", re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s:/@'\"]+:(?P<secret>[^\s@/'\"]+)@")),
+    # `DB_PASSWORD = "…"`, `password="…"`, `'PASSWORD': '…'`: a secret-named
+    # key bound to a literal that looks like one — 8+ characters with a digit
+    # or a symbol. "password", "Bearer" and "/api/token/" are not redacted.
+    (
+        "secret_assignment",
+        re.compile(
+            r"(?i)\b" + _SECRET_NAME + r"""['"]?\s*[:=]\s*[rbuf]?(['"])"""
+            r"""(?P<secret>(?=[^'"\n]*[0-9!@#$%^&*()+=~])[^'"\s]{8,})\1"""
         ),
     ),
     ("high_entropy_literal", re.compile(r"""(?<=['"])[A-Za-z0-9+/=_-]{33,}(?=['"])""")),
@@ -67,7 +93,21 @@ SCRUB_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: changes invalidate the cache" — that only holds if a rule change actually
 #: alters the hashed text, which it does not when a *new* rule matches nothing
 #: in a given symbol. Folding the version into the header closes that gap.
-SCRUB_RULES_VERSION = "1"
+SCRUB_RULES_VERSION = "2"
+
+
+def _redactor(name: str):
+    token = f"{REDACTED}:{name}"
+
+    def replace(match: re.Match[str]) -> str:
+        if "secret" in match.re.groupindex and match.group("secret") is not None:
+            start, end = match.span("secret")
+            whole = match.group(0)
+            offset = match.start()
+            return whole[: start - offset] + token + whole[end - offset:]
+        return token
+
+    return replace
 
 
 def scrub_secrets(text: str) -> str:
@@ -77,10 +117,27 @@ def scrub_secrets(text: str) -> str:
     unredacted form is never stored on the node.
     """
     for name, pattern in SCRUB_RULES:
-        text, count = pattern.subn(f"{REDACTED}:{name}", text)
+        text, count = pattern.subn(_redactor(name), text)
         if count:
             metrics.incr("scrub.redactions", count)
     return text
+
+
+def scrub_symbol(sym: Symbol) -> None:
+    """Scrub every text field of `sym` that is hashed, embedded or stored.
+
+    Not just the body: a default argument is in `signature`, a decorator
+    argument in `decorators`, a class keyword in the `enclosing_signature` of
+    every method — and all three reach the chunk header, the embedding text
+    and the node.
+    """
+    sym.source_code = scrub_secrets(sym.source_code)
+    sym.signature = scrub_secrets(sym.signature)
+    if sym.docstring:
+        sym.docstring = scrub_secrets(sym.docstring)
+    if sym.enclosing_signature:
+        sym.enclosing_signature = scrub_secrets(sym.enclosing_signature)
+    sym.decorators = [scrub_secrets(d) for d in sym.decorators]
 
 
 # --------------------------------------------------------------------------
@@ -276,11 +333,12 @@ def chunk_file(parsed: ParsedFile, tokenizer: Tokenizer) -> ParsedFile:
         parent = sym.qualified_name.rsplit(".", 1)[0]
         members_by_parent.setdefault(parent, []).append(sym)
 
+    # Every symbol first: a class's chunk is built from its members'
+    # signatures, and a member later in the list would not be scrubbed yet.
     for sym in parsed.symbols:
-        sym.source_code = scrub_secrets(sym.source_code)
-        if sym.docstring:
-            sym.docstring = scrub_secrets(sym.docstring)
+        scrub_symbol(sym)
 
+    for sym in parsed.symbols:
         members = members_by_parent.get(sym.qualified_name, [])
         if sym.kind == "class":
             body = class_chunk_body(sym, members)
