@@ -39,7 +39,10 @@ TRAVERSALS: dict[str, tuple[str, tuple[str, ...]]] = {
          "USES_SERIALIZER", "HAS_FIELD", "INHERITS"),
     ),
     "definition": ("in", ("DEFINES",)),
-    "imports": ("in", ("IMPORTS",)),
+    # "in_or_members": an IMPORTS edge points at what is imported, so
+    # `from common.utils import audit_event` is an edge to the function, and
+    # "what imports common.utils" must also follow edges into what it defines.
+    "imports": ("in_or_members", ("IMPORTS",)),
     "routes": ("both", ("DISPATCHES_TO", "RENDERS")),
     "subclasses": ("in", ("INHERITS",)),
 }
@@ -123,6 +126,17 @@ _TRAVERSE = {
     "out": """
         MATCH (t:Symbol {repo_id: $repo_id}) WHERE t.uid IN $uids
         MATCH (t)-[r]->(n:Symbol {repo_id: $repo_id})
+        WHERE type(r) IN $types AND NOT n.uid IN $uids
+        RETURN DISTINCT n.uid AS uid, n.rel_path AS rel_path,
+               n.start_line AS start_line, type(r) AS rel
+        ORDER BY rel_path, start_line, uid
+    """,
+    "in_or_members": """
+        MATCH (t:Symbol {repo_id: $repo_id}) WHERE t.uid IN $uids
+        OPTIONAL MATCH (t)-[:DEFINES]->(member:Symbol {repo_id: $repo_id})
+        WITH collect(DISTINCT t) + collect(DISTINCT member) AS targets
+        UNWIND targets AS target
+        MATCH (n:Symbol {repo_id: $repo_id})-[r]->(target)
         WHERE type(r) IN $types AND NOT n.uid IN $uids
         RETURN DISTINCT n.uid AS uid, n.rel_path AS rel_path,
                n.start_line AS start_line, type(r) AS rel

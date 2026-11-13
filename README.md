@@ -104,7 +104,7 @@ moves a class score by 6.7 points.
 |---|---|---|
 | Recall@10 on the packed context the model saw, vector arm on (off) | 0.978 (0.933) | ≥ 0.80 |
 | MRR | 0.828 | ≥ 0.55 |
-| Structural traversal against the full expected answer: precision / recall | 0.971 / 0.786 | — |
+| Structural traversal against the full expected answer: precision / recall | 0.974 / 0.881 | — |
 | Citation coverage (claim sentences citing a shown block), four runs | 0.797 – 0.919 | ≥ 0.85 |
 | Cited claims whose cited block lacks a code name they mention | 7 of 55 | — |
 | Relation precision (relation claims the graph confirms) | 0.750, over 4 claims | ≥ 0.90 |
@@ -121,9 +121,8 @@ What the table does not say on its own:
   is the symbol the question names. Whether the traversal returned the right
   callers is the separate *structural traversal* row, scored against
   `expected_related` in the golden set — the full answer read off the fixture's
-  source and cross-checked with Python's `ast`. Its misses are real: "what
-  imports `common.utils`" returns nothing (import edges point at the imported
-  functions, not the module), a route question falls back to search, and
+  source and cross-checked with Python's `ast`. Its misses are real: a route
+  question falls back to search, a `Meta.model` reference is not an edge, and
   `token.revoke()` on a local variable is never resolved.
 - **Citation coverage fails the gate on the latest run** (0.797). One answer
   made 8 uncited claims; without it the run is 0.90. The model does not follow
