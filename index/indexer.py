@@ -420,10 +420,49 @@ class Indexer:
             return                                  # nothing to do; do not touch the graph
 
         vectors = await self._embed(repo, batch)
-        await asyncio.to_thread(
+        report = await asyncio.to_thread(
             self.writer.apply, repo, batch, batch_paths, vectors, epoch
         )
         self._indexed[repo] |= set(batch)
+        await self._relink(repo, getattr(report, "relink_paths", None) or [], batch_paths)
+
+    async def _relink(self, repo: str, paths: list[str], written: set[str]) -> None:
+        """Re-write the files whose edges pointed at a symbol the batch replaced.
+
+        A changed parameter count is a new UID (`symbol_uid`), and step 5's
+        `DETACH DELETE` of the old node takes its incoming edges with it. The
+        callers live in files nobody saved, so nothing else would re-resolve
+        them until Sync Project. Their content is unchanged, so this costs a
+        parse and cache hits — and their symbols keep their UIDs, so the
+        follow-up orphans nothing and the re-link stops after one round.
+        """
+        todo = sorted(set(paths) - written)
+        if not todo:
+            return
+        followup: dict[str, ParsedFile] = {}
+        for rel in todo:
+            try:
+                parsed = self._parse(repo, rel, self._read(repo, rel))
+            except OSError:
+                metrics.incr("index.relink_unreadable")   # gone; the reconcile will see it
+                continue
+            if parsed is not None:
+                followup[rel] = parsed
+        if not followup:
+            return
+        metrics.incr("index.relinked_files", len(followup))
+        try:
+            vectors = await self._embed(repo, followup)
+            await asyncio.to_thread(
+                self.writer.apply, repo, followup, set(followup), vectors, time.time_ns()
+            )
+        except Exception:
+            # The batch itself is written; only the re-link failed. Re-writing
+            # the batch would orphan nothing now, so it could never ask for this
+            # again. Queue the callers' files as if they had been saved instead.
+            for rel, parsed in followup.items():
+                self._pending[repo].setdefault(rel, parsed)
+            raise
 
     def _requeue(self, repo: str, batch: dict[str, ParsedFile], moves: list[Move]) -> None:
         """§9.3: "Flush crashes mid-sequence — next flush converges."

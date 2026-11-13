@@ -22,7 +22,7 @@ one place to audit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from neo4j import Driver
@@ -55,6 +55,11 @@ class WriteReport:
     stale_edges_deleted: int = 0
     orphans_deleted: int = 0
     stopped_after: str | None = None
+    #: Paths outside this batch whose symbols had edges into a symbol this
+    #: batch orphaned — a function whose arity changed gets a new UID, and
+    #: step 5's DETACH DELETE takes its incoming edges with it. The indexer
+    #: re-reads these files so their edges resolve to the new node.
+    relink_paths: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +348,10 @@ class GraphWriter:
         boundary("4")
 
         # -- 5. Orphan symbols ----------------------------------------------
+        # Who points at an orphan from outside the batch is read first:
+        # DETACH DELETE removes those edges, and nothing else would put
+        # them back until the callers' own files were written.
+        report.relink_paths = self._outside_callers_of_orphans(repo_id, paths, epoch)
         report.orphans_deleted = self._delete_orphans(repo_id, paths, epoch)
         boundary("5")
 
@@ -713,6 +722,27 @@ class GraphWriter:
             epoch=epoch,
         )
         return rows[0]["n"] if rows else 0
+
+    def _outside_callers_of_orphans(
+        self, repo_id: str, paths: list[str], epoch: int
+    ) -> list[str]:
+        """Origin paths, outside the batch, of symbols with edges into an orphan."""
+        if not paths:
+            return []
+        rows = self._run(
+            """
+            MATCH (s:Symbol)
+            WHERE s.repo_id = $repo_id AND s.origin_path IN $batch_paths
+              AND s.epoch < $epoch
+            MATCH (c:Symbol {repo_id: $repo_id})-[]->(s)
+            WHERE NOT c.origin_path IN $batch_paths
+            RETURN DISTINCT c.origin_path AS path ORDER BY path
+            """,
+            repo_id=repo_id,
+            batch_paths=paths,
+            epoch=epoch,
+        )
+        return [row["path"] for row in rows if row["path"]]
 
     def _delete_orphans(self, repo_id: str, paths: list[str], epoch: int) -> int:
         """§11.2 step 5, plus the `:File` rows the same paths no longer back."""
