@@ -151,6 +151,9 @@ class StructuralAnswer:
     total_related: int = 0
     #: Why the traversal could not answer, when it could not. None on success.
     fallback: str | None = None
+    #: The qualified names an ambiguous entity could mean, for the reader to
+    #: choose from. Empty unless the name was refused as ambiguous.
+    candidates: list[str] = field(default_factory=list)
 
     def note(self) -> dict:
         note = {
@@ -161,6 +164,8 @@ class StructuralAnswer:
         }
         if self.fallback:
             note["fallback"] = self.fallback
+        if self.candidates:
+            note["candidates"] = self.candidates
         return note
 
 
@@ -193,6 +198,22 @@ class StructuralResolver:
                 continue
             exact = [r for r in found if r["exact"]]
             chosen = exact or found
+            distinct = sorted({r["qualified_name"] for r in chosen})
+            if not exact and len(distinct) > 1:
+                # Several different symbols answer to this name. Merging their
+                # callers would answer a question nobody asked; picking one
+                # would be a guess. Ask instead. (Overloads share a qualified
+                # name, so they are one entity and never land here.)
+                metrics.incr("structural.ambiguous")
+                answer.term = term
+                answer.candidates = distinct
+                shown = ", ".join(f"`{name}`" for name in distinct[:5])
+                more = f" and {len(distinct) - 5} more" if len(distinct) > 5 else ""
+                answer.fallback = (
+                    f"`{term}` names {len(distinct)} symbols ({shown}{more}); "
+                    f"refusing to pick one — say which one you mean"
+                )
+                return answer
             if len(chosen) > self.max_entities:
                 metrics.incr("structural.ambiguous")
                 answer.term = term
