@@ -16,3 +16,4 @@ tests/step_01_ground_truth/probe_results.json
 tests/step_06_retrieval/RECALL_BASELINE.md
 eval/STRUCTURAL_REPORT.md
 *.egg-info/
+eval/BENCHMARK_REPORT.md

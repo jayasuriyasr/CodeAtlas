@@ -118,6 +118,20 @@ moves a class score by 6.7 points.
 | Embedding cache hit rate on an unchanged re-index | 1.000 | ≥ 0.90 |
 | T2 claim classifier, precision / recall — on the author's own reference sentences | 0.981 / 0.962 | ≥ 0.90 / 0.85 |
 
+**On code not written for SEI.** `python -m eval.benchmark` indexes pinned
+releases of two open-source Django projects and scores "what calls X" against
+the callers jedi (a Python language server) finds, for every function jedi
+finds at least one caller for:
+
+| Repository (pinned commit) | Functions scored | Precision | Recall |
+|---|---|---|---|
+| django-taggit 6.1.0 (`4e5f7de6`) | 45 | 1.000 | 0.862 |
+| django-filter 26.2 (`daddf7b6`) | 60 | 1.000 | 0.282 |
+
+SEI reported no caller jedi disagrees with; what it misses is mostly calls
+through `super()` and method calls on local variables, which need type
+inference. TypeScript has no language-server gold yet.
+
 What the table does not say on its own:
 
 - **Recall@10 for structural questions measures entity lookup.** Their `gold`
