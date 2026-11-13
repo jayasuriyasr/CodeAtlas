@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 import metrics
-from config import RRF_K, RRF_TOP_K, VECTOR_OVERFETCH_FACTOR
+from config import RRF_K, RRF_TOP_K, VECTOR_MAX_FETCH, VECTOR_OVERFETCH_FACTOR
 from retrieve.tokenize import build_fulltext_query
 
 Vector = Sequence[float]
@@ -153,22 +153,47 @@ class Neo4jSearchBackend:
             return list(session.run(cypher, params))
 
     def vector_search(self, repo_id: str, vec: Vector, k: int) -> list[tuple[str, float]]:
-        # Over-fetch before filtering by repo_id: the index is shared across
-        # tenants (§9.1's MVP is one database with repo_id on every node), so a
-        # top-k taken before the filter can be entirely another tenant's rows.
-        rows = self._run(
-            f"""
-            CALL db.index.vector.queryNodes('{self.VECTOR_INDEX}', $fetch, $vec)
-            YIELD node, score
-            WHERE node.repo_id = $repo_id
-            RETURN node.uid AS uid, score ORDER BY score DESC LIMIT $k
-            """,
-            fetch=k * VECTOR_OVERFETCH_FACTOR,
-            vec=list(vec),
-            repo_id=repo_id,
-            k=k,
-        )
-        return [(row["uid"], row["score"]) for row in rows]
+        """This repository's `k` nearest symbols.
+
+        The index is shared across tenants (§9.1's MVP is one database with
+        repo_id on every node) and 5.26 cannot filter before it searches, so
+        the nearest `fetch` are taken across *every* repository and filtered
+        afterwards. A fixed `fetch` fails silently: beside a larger repository
+        whose code is nearer the question, the top `fetch` are all the other
+        tenant's rows and this one's arm comes back short or empty (F-028).
+
+        So the fetch widens until one of three things is true: this repository
+        has its `k`; the index returned fewer rows than were asked for, which
+        means there are no more; or `VECTOR_MAX_FETCH` is reached. The usual
+        case — one repository, or repositories of similar size — is still a
+        single query.
+        """
+        fetch = max(k * VECTOR_OVERFETCH_FACTOR, 1)
+        vec = list(vec)
+        while True:
+            row = self._run(
+                f"""
+                CALL db.index.vector.queryNodes('{self.VECTOR_INDEX}', $fetch, $vec)
+                YIELD node, score
+                WITH node, score ORDER BY score DESC
+                WITH collect({{repo_id: node.repo_id, uid: node.uid, score: score}}) AS hits
+                RETURN size(hits) AS fetched,
+                       [h IN hits WHERE h.repo_id = $repo_id][..$k] AS mine
+                """,
+                fetch=fetch,
+                vec=vec,
+                repo_id=repo_id,
+                k=k,
+            )[0]
+            mine = row["mine"]
+            if len(mine) >= k or row["fetched"] < fetch:
+                break
+            if fetch >= VECTOR_MAX_FETCH:
+                metrics.incr("retrieve.vector_starved")
+                break
+            fetch = min(fetch * VECTOR_OVERFETCH_FACTOR, VECTOR_MAX_FETCH)
+            metrics.incr("retrieve.vector_refetch")
+        return [(hit["uid"], hit["score"]) for hit in mine]
 
     def fulltext_search(self, repo_id: str, query: str, k: int) -> list[tuple[str, float]]:
         rows = self._run(

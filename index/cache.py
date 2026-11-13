@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
@@ -33,6 +34,15 @@ class EmbeddingUnavailable(RuntimeError):
     retrieve on fulltext plus expansion, tell the user search is degraded — and
     that behaviour must not swallow a configuration error such as a dimension
     mismatch, which is a `ValueError` and stops everything.
+    """
+
+
+class EmbeddingDisabled(EmbeddingUnavailable):
+    """No embedding provider is configured at all — a choice, not an outage.
+
+    Handled like an outage (index and search without vectors) and not logged
+    like one: warning on every flush that the user has not set up something
+    they chose not to set up is noise.
     """
 
 
@@ -74,6 +84,10 @@ class EmbeddingCache:
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        #: One connection, several threads: the indexer embeds on a worker
+        #: thread while a request thread reads. The lock makes that serial
+        #: rather than relying on how this Python's sqlite3 was compiled.
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             """
@@ -86,6 +100,9 @@ class EmbeddingCache:
             )
             """
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         self._conn.commit()
 
     def get_many(self, keys: list[str]) -> dict[str, Vector]:
@@ -97,11 +114,12 @@ class EmbeddingCache:
         for start in range(0, len(keys), 500):
             window = keys[start : start + 500]
             placeholders = ",".join("?" * len(window))
-            rows = self._conn.execute(
-                f"SELECT cache_key, vector, dimensions FROM embeddings "
-                f"WHERE model = ? AND cache_key IN ({placeholders})",
-                [self.model, *window],
-            ).fetchall()
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT cache_key, vector, dimensions FROM embeddings "
+                    f"WHERE model = ? AND cache_key IN ({placeholders})",
+                    [self.model, *window],
+                ).fetchall()
             for key, blob, dims in rows:
                 if dims != self.dimensions:
                     continue          # a stale row from a different model version
@@ -115,21 +133,55 @@ class EmbeddingCache:
         ]
         if not rows:
             return 0
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO embeddings "
-            "(cache_key, model, dimensions, vector) VALUES (?, ?, ?, ?)",
-            rows,
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO embeddings "
+                "(cache_key, model, dimensions, vector) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            self._conn.commit()
         return len(rows)
 
     def __len__(self) -> int:
-        return self._conn.execute(
-            "SELECT count(*) FROM embeddings WHERE model = ?", (self.model,)
-        ).fetchone()[0]
+        with self._lock:
+            return self._conn.execute(
+                "SELECT count(*) FROM embeddings WHERE model = ?", (self.model,)
+            ).fetchone()[0]
+
+    # -- which embedder a repository's vectors came from ---------------------
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+            )
+            self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
+
+
+def embedder_key(repo_id: str) -> str:
+    """Meta key recording which embedding model wrote a repository's vectors.
+
+    Vectors from two models share a column and no space: a query embedded by
+    one and compared against documents embedded by another returns confident
+    noise, and nothing in the graph says which model wrote a `code_vec`. So the
+    indexer records the model each time it re-embeds a whole repository, and
+    both it and the query path check the record before touching vectors.
+
+    It lives beside the cache rather than in the graph because it is a fact
+    about embeddings, and adding it to the graph would change §3.3's data model.
+    """
+    return f"index_embed_model:{repo_id}"
 
 
 # --------------------------------------------------------------------------

@@ -35,7 +35,25 @@ the file over describing them.\
 """
 
 
-def build_prompt(question: str, context: PackedContext) -> str:
+#: A closing reminder for models that do not follow §6.1's instruction from the
+#: system prompt alone. Measured on the local 3B model over 38 golden questions
+#: (FINDINGS F-026): without it 0.22 of claim sentences were cited; with it,
+#: 0.91. Two details are load-bearing. It comes *last*, after the context, where
+#: a small model still attends to it. And its example is about a different
+#: program on purpose: an example drawn from the codebase scored 1.00 and was
+#: copied word for word into answers about something else.
+ANSWER_FORMAT_REMINDER = """\
+# How to answer
+Answer the question in 2 to 5 short sentences, using only the context above. \
+End every sentence with the handle of the context block it is based on, in \
+square brackets exactly as shown above that block: [C1], [C2] and so on. If the \
+context does not answer the question, say so in one sentence.
+Format example, about a different program (never reuse its content): \
+"The `resize` helper scales the image before it is saved [C4]."\
+"""
+
+
+def build_prompt(question: str, context: PackedContext, *, reminder: str = "") -> str:
     """Question plus packed context, with the packing report attached.
 
     The report is in the prompt as well as the UI on purpose. §5.4 gives the
@@ -50,6 +68,8 @@ def build_prompt(question: str, context: PackedContext) -> str:
         f"# Context\n{blocks}" if blocks else "# Context\n(no context retrieved)",
         f"# Retrieval report\n{context.report()}",
     ]
+    if reminder:
+        parts.append(reminder)
     return "\n\n".join(parts)
 
 
@@ -71,7 +91,12 @@ codebase, and say plainly what the context does not show.\
 
 
 def build_retry_prompt(
-    question: str, context: PackedContext, reason: str, *, added_context: bool = True
+    question: str,
+    context: PackedContext,
+    reason: str,
+    *,
+    added_context: bool = True,
+    reminder: str = "",
 ) -> str:
     """§6.3's single bounded retry.
 
@@ -81,4 +106,6 @@ def build_retry_prompt(
     a full generation to change nothing.
     """
     prefix = RETRY_PREFIX if added_context else RETRY_PREFIX_SAME_CONTEXT
-    return "\n\n".join([prefix, f"# Why\n{reason}", build_prompt(question, context)])
+    return "\n\n".join(
+        [prefix, f"# Why\n{reason}", build_prompt(question, context, reminder=reminder)]
+    )

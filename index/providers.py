@@ -41,7 +41,7 @@ from config import (
     PROVIDER_TIMEOUT_SECONDS,
     RESERVED_OUT,
 )
-from index.cache import EmbeddingUnavailable
+from index.cache import EmbeddingDisabled, EmbeddingUnavailable
 
 Vector = Sequence[float]
 
@@ -116,6 +116,9 @@ class HashEmbeddingProvider:
     Any test that claims a retrieval quality number needs the real provider.
     """
 
+    #: Its vectors mean nothing, so nothing may search with them (F-009).
+    semantic = False
+
     def __init__(self, dimensions: int = EMBED_DIM, name: str = "hash-test-provider"):
         self.dimensions = dimensions
         self.name = name
@@ -141,6 +144,26 @@ class HashEmbeddingProvider:
         return [v / norm for v in out]      # cosine similarity wants unit length
 
 
+class DisabledEmbeddingProvider:
+    """No embedder at all: `--offline`, or nothing configured and nothing local.
+
+    The CLI used to fall back to `HashEmbeddingProvider` here, which *writes*
+    its meaningless vectors — over real ones, if the graph had them. Raising
+    instead takes the indexer's degraded path (§9.3): symbols are written
+    without a vector, any vector they already had stays, and search runs on
+    fulltext and expansion.
+    """
+
+    name = "none"
+    semantic = False
+
+    def __init__(self, dimensions: int = EMBED_DIM) -> None:
+        self.dimensions = dimensions
+
+    def embed(self, texts: list[str]) -> list[Vector]:
+        raise EmbeddingDisabled("no embedding provider is configured")
+
+
 class VoyageEmbeddingProvider:
     """The embedding provider decision 0002 names: `voyage-code-2`, 1536 dims.
 
@@ -161,6 +184,7 @@ class VoyageEmbeddingProvider:
     """
 
     URL = "https://api.voyageai.com/v1/embeddings"
+    semantic = True
 
     def __init__(
         self,
@@ -330,6 +354,34 @@ class AnthropicProvider:
             model=self.model, messages=[{"role": "user", "content": text}]
         )
         return response.input_tokens
+
+
+class UnavailableLLM:
+    """No model to answer with — and the reason, for whoever is waiting.
+
+    Raising from `stream` puts the request on §9.3's "LLM provider" row: the
+    reader gets the ranked, cited code blocks and is told synthesis is
+    unavailable, rather than an error page or an answer from nowhere.
+    """
+
+    name = "none"
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def stream(
+        self,
+        system: str,
+        prompt: str,
+        *,
+        max_tokens: int = RESERVED_OUT,
+        usage: dict | None = None,
+    ):
+        raise ConnectionError(self.reason)
+        yield ""                                   # pragma: no cover - a generator
+
+    def count(self, text: str) -> int:
+        return ApproxCodeTokenizer().count(text)
 
 
 class ScriptedLLM:

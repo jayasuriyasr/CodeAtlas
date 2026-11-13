@@ -63,6 +63,10 @@ class NamedSymbol:
     rel_path: str
     start_line: int
     end_line: int
+    #: "function" | "class" | "module". Tier 2 needs it: a stack frame names a
+    #: function, and `UserCard.tsx` yields a module *and* a component both
+    #: called `UserCard` (FINDINGS F-027).
+    kind: str = ""
 
 
 class GraphReader:
@@ -211,19 +215,40 @@ class GraphReader:
                 rel_path=row["rel_path"],
                 start_line=row["start_line"] or 0,
                 end_line=row["end_line"] or 0,
+                kind=row["kind"] or "",
             )
             for row in self._run(
                 """
                 MATCH (s:Symbol {repo_id: $repo_id, name: $name})
                 RETURN s.uid AS uid, s.qualified_name AS qualified_name,
                        s.rel_path AS rel_path, s.start_line AS start_line,
-                       s.end_line AS end_line
+                       s.end_line AS end_line, s.kind AS kind
                 ORDER BY s.rel_path, s.start_line
                 """,
                 repo_id=repo_id,
                 name=name,
             )
         ]
+
+    def stats(self, repo_id: str) -> dict[str, int]:
+        """Files, symbols, relationships and embedded symbols for one repository.
+
+        For `/status`: "is anything indexed, and does it have vectors" is the
+        first question when an answer looks wrong. `embedded` below `symbols` is
+        normal — it is how §9.3's degraded indexing shows.
+        """
+        row = self._run(
+            """
+            OPTIONAL MATCH (f:File {repo_id: $repo_id})
+            WITH count(f) AS files
+            OPTIONAL MATCH (s:Symbol {repo_id: $repo_id})
+            WITH files, count(s) AS symbols, count(s.code_vec) AS embedded
+            OPTIONAL MATCH (:Symbol {repo_id: $repo_id})-[r]->()
+            RETURN files, symbols, embedded, count(r) AS relationships
+            """,
+            repo_id=repo_id,
+        )[0]
+        return {key: row[key] for key in ("files", "symbols", "embedded", "relationships")}
 
     # -- helpers the tests and the packer share ---------------------------
 

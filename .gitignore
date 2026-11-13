@@ -5,3 +5,12 @@ __pycache__/
 venv/
 .sei/
 *.sqlite
+.local/
+
+# Written by the test suite and by eval/local_gates.py on every run
+eval/GATE_REPORT.md
+eval/GATE_REPORT_local.md
+eval/GATE_REPORT_no_database.md
+tests/step_01_ground_truth/PROBE_RESULTS.md
+tests/step_01_ground_truth/probe_results.json
+tests/step_06_retrieval/RECALL_BASELINE.md

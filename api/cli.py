@@ -8,19 +8,20 @@ about the Django fixture, answered with citations, streamed.
     python -m api.cli --repo <id> --root <path> --reindex "how are tokens issued"
     python -m api.cli --repo <id> --root <path> --offline "what calls `charge_card`"
     python -m api.cli --repo <id> --root <path> --sync
-    python -m api.cli --repo <id> --root <path> --serve --port 8000
+    python -m api.cli --repo <id> --root <path> --serve --watch --port 8000
 
 It wires the real components end to end: index the tree with both language
 adapters, route the question (§5.1), retrieve by the route, expand, pack,
-synthesize, validate. Which is also why it needs a live Neo4j and configured
-providers — every substitute that makes a unit test safe makes this demo a lie,
-and each one in use is announced on stderr.
+synthesize, validate. Which providers answer is decided here (`choose_providers`)
+and announced on stderr — hosted when its key is set, the local Ollama models
+otherwise (decision 0003), nothing at all under `--offline`.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 import time
@@ -31,29 +32,40 @@ import metrics
 from adapters.python import PythonAdapter
 from adapters.typescript import TypeScriptAdapter
 from config import (
-    EMBED_MODEL,
+    AI_MODE,
+    AVAILABLE,
     EMBEDDING_CACHE_PATH,
-    LLM_MODEL,
+    LOCAL_CONTEXT_HEADROOM,
+    LOCAL_EMBED_MODEL,
+    LOCAL_LLM_MODEL,
     NEO4J_DEFAULT_DATABASE,
     NEO4J_PASSWORD,
     NEO4J_URI,
     NEO4J_USER,
+    OLLAMA_URL,
+    RESERVED_OUT,
+    RESERVED_SYS,
 )
 from graph.bootstrap import apply_schema
 from graph.reader import GraphReader
 from graph.writer import GraphWriter
-from index.cache import EmbeddingCache
+from index.cache import EmbeddingCache, EmbeddingUnavailable, embedder_key
 from index.indexer import Indexer
+from index.ollama import OllamaEmbeddingProvider, OllamaLLM, has_model, installed_models
 from index.providers import (
     AnthropicProvider,
     ApproxCodeTokenizer,
-    HashEmbeddingProvider,
+    DisabledEmbeddingProvider,
+    UnavailableLLM,
     VoyageEmbeddingProvider,
 )
+from index.watcher import TreeWatcher
 from retrieve.expand import NeighborhoodExpander
 from retrieve.hybrid import HybridRetriever, Neo4jSearchBackend
 from retrieve.pipeline import QueryRetriever
 from retrieve.structural import StructuralResolver
+
+AI_MODES = ("auto", "local", "cloud", "off")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,14 +84,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sync Project (§4.1): the recovery path for undetected moves",
     )
     parser.add_argument(
+        "--ai",
+        choices=AI_MODES,
+        default=AI_MODE if AI_MODE in AI_MODES else "auto",
+        help=(
+            "which models answer: auto (hosted when its API key is set, else the "
+            "local Ollama models), local, cloud, or off"
+        ),
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help=(
-            "use the stand-in embedding provider and skip synthesis. Retrieval "
-            "only — no source leaves the machine."
+            "no model at all, hosted or local: retrieval only, by fulltext and "
+            "graph. Same as --ai off, and prints the retrieved code instead of "
+            "an answer."
         ),
     )
-    parser.add_argument("--serve", action="store_true", help="run the HTTP API (FastAPI + SSE)")
+    parser.add_argument("--serve", action="store_true", help="run the console and HTTP API")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="with --serve: index at start-up and re-index files as they change",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="--serve bind address")
     parser.add_argument("--port", type=int, default=8000, help="--serve port")
     return parser
@@ -102,26 +129,94 @@ def _utf8_streams() -> None:
 def _driver():
     from neo4j import GraphDatabase
 
+    # The server notes, as warnings, every property and relationship type a
+    # query names before the first write has created it. On a new database
+    # that is every query, and the driver logs each one in full.
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
-def _embedding_provider(offline: bool):
-    """The real provider when a key is configured; the stand-in otherwise.
+# --------------------------------------------------------------------------
+# Which models answer (decisions 0002 and 0003)
+# --------------------------------------------------------------------------
 
-    Returns `(provider, vectors_meaningful)`. The stand-in's vectors carry no
-    semantic structure (F-009), so with it the vector arm is switched off for
-    queries rather than fused in as noise.
+
+def _hosted_llm_configured() -> bool:
+    return any(os.environ.get(name) for name in
+               ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"))
+
+
+#: "Ask the server" — distinct from None, which is the answer "there is none".
+_PROBE: set[str] = set()
+
+
+def choose_providers(mode: str, *, local_models: set[str] | None = _PROBE):
+    """`(llm, embedding_provider, notes)` for an AI mode.
+
+    `local_models` is what the Ollama server holds: a set of names, or None when
+    no server answers. Left at its default, the server is asked.
+
+    `auto` prefers a hosted provider *the user has configured* — setting a key
+    is a decision to send code to that service (§12.0) — and otherwise uses the
+    local models if the Ollama server answers and holds them. The two halves
+    are chosen independently: one key without the other is a normal state.
+
+    Nothing here falls back silently. Each note says what was chosen and what
+    it costs the answer, and the caller prints them.
     """
-    if offline:
-        return HashEmbeddingProvider(), False
-    if os.environ.get("VOYAGE_API_KEY"):
-        return VoyageEmbeddingProvider(), True
-    print(
-        "warning: VOYAGE_API_KEY not set; using the stand-in embedding provider. "
-        "Retrieval runs on fulltext and graph expansion only (F-009).",
-        file=sys.stderr,
-    )
-    return HashEmbeddingProvider(), False
+    notes: list[str] = []
+    if mode == "off":
+        return (UnavailableLLM("no model: running with --ai off"),
+                DisabledEmbeddingProvider(), ["AI off: retrieval by fulltext and graph only."])
+
+    if local_models is _PROBE:
+        local_models = installed_models() if mode in ("auto", "local") else None
+    local_llm = has_model(local_models, LOCAL_LLM_MODEL)
+    local_embed = has_model(local_models, LOCAL_EMBED_MODEL)
+
+    # -- synthesis ---------------------------------------------------------
+    if mode == "cloud" or (mode == "auto" and _hosted_llm_configured()):
+        llm = AnthropicProvider()
+    elif local_llm:
+        llm = OllamaLLM()
+        notes.append(f"Answers: local model {LOCAL_LLM_MODEL} (nothing leaves this machine).")
+    else:
+        llm = UnavailableLLM(_why_no_local(local_models, LOCAL_LLM_MODEL))
+        notes.append(f"No model for answers ({llm.reason}); answers are retrieval-only (§9.3).")
+
+    # -- embeddings --------------------------------------------------------
+    if mode in ("cloud", "auto") and os.environ.get("VOYAGE_API_KEY"):
+        provider = VoyageEmbeddingProvider()
+    elif mode != "cloud" and local_embed:
+        provider = OllamaEmbeddingProvider()
+        notes.append(f"Search: local embeddings {LOCAL_EMBED_MODEL}.")
+    else:
+        provider = DisabledEmbeddingProvider()
+        why = "VOYAGE_API_KEY not set" if mode == "cloud" else _why_no_local(
+            local_models, LOCAL_EMBED_MODEL)
+        notes.append(f"No embedding model ({why}); search is fulltext and graph only (F-009).")
+    return llm, provider, notes
+
+
+def _why_no_local(models: set[str] | None, wanted: str) -> str:
+    if models is None:
+        return f"no Ollama server at {OLLAMA_URL}"
+    return f"model {wanted} is not pulled — run: ollama pull {wanted}"
+
+
+def context_budget(llm) -> int:
+    """How many tokens of packed context this model is given.
+
+    §5.4's `AVAILABLE` is a quality setting far below a hosted model's window.
+    A local model's window is a hard capacity, smaller than that setting, so
+    the budget becomes what fits: the window, less the answer and the system
+    prompt, less headroom for the stand-in tokenizer's error (F-006, F-025).
+    """
+    window = getattr(llm, "context_tokens", None)
+    if window is None:
+        return AVAILABLE
+    fits = int((window - RESERVED_OUT - RESERVED_SYS) * LOCAL_CONTEXT_HEADROOM)
+    return max(0, min(AVAILABLE, fits))
 
 
 def _adapters() -> dict:
@@ -154,25 +249,122 @@ class Runtime:
     indexer: Indexer
     service: object
     retriever: QueryRetriever
+    repo: str = ""
+    root: Path | None = None
+    reader: GraphReader | None = None
+    notes: tuple[str, ...] = ()
+
+    @property
+    def provider(self):
+        return self.indexer.provider
+
+    @property
+    def llm(self):
+        return self.service.llm
 
     def close(self) -> None:
         self.indexer.cache.close()
         self.driver.close()
+
+    # -- vectors -----------------------------------------------------------
+
+    def vector_search(self) -> tuple[bool, str]:
+        """Whether queries may use the vector arm, and why not when they may not."""
+        provider = self.provider
+        if not getattr(provider, "semantic", False):
+            return False, "no embedding model is configured"
+        recorded = self.indexer.cache.get_meta(embedder_key(self.repo))
+        if recorded != provider.name:
+            was = recorded or "no embedding model"
+            return False, (f"the index was embedded with {was}, not {provider.name} — "
+                           f"re-index to use vector search")
+        return True, ""
+
+    def embed_query(self, text: str):
+        """Embed a query — only against an index the same model embedded.
+
+        Otherwise the comparison is between two unrelated vector spaces: it
+        returns results, ranked, and they mean nothing.
+        """
+        usable, why = self.vector_search()
+        if not usable:
+            raise EmbeddingUnavailable(why)
+        provider = self.provider
+        embed = getattr(provider, "embed_query", None)
+        return embed(text) if embed is not None else provider.embed([text])[0]
+
+    # -- keeping the index current ------------------------------------------
+
+    async def bootstrap(self) -> None:
+        """Bring the graph level with the working tree at server start.
+
+        Three cases. Never indexed: index everything. Indexed with another
+        embedder: re-embed everything — automatically when the new one is local
+        and free, on request when it is hosted and billed. Otherwise: the
+        ordinary diff, for whatever changed while nothing was watching.
+        """
+        indexer, repo, provider = self.indexer, self.repo, self.provider
+        warm = getattr(self.llm, "warm", None)
+        if warm is not None:
+            # Load the answer model while the index catches up, not on the
+            # first question. A failure here is not fatal: asking will say why.
+            loading = asyncio.create_task(asyncio.to_thread(warm))
+            loading.add_done_callback(lambda task: task.cancelled() or task.exception())
+        known = await asyncio.to_thread(self.reader.known_paths, repo)
+        recorded = indexer.cache.get_meta(embedder_key(repo))
+        stale = getattr(provider, "semantic", False) and recorded != provider.name
+
+        if not known:
+            print(f"indexing {self.root} for the first time…", file=sys.stderr)
+            await indexer.sync_project(repo)
+        elif stale and getattr(provider, "local", False):
+            print(f"re-embedding {repo} with {provider.name} "
+                  f"(was {recorded or 'none'})…", file=sys.stderr)
+            await indexer.sync_project(repo)
+        else:
+            if stale:
+                print(f"note: {repo} was embedded with {recorded or 'no model'}; vector "
+                      f"search stays off until you run --reindex ({provider.name} is "
+                      f"billed, so that is not done for you).", file=sys.stderr)
+            await indexer.reconcile(repo)
+        print(f"index is current: {self.status().get('graph')}", file=sys.stderr)
+
+    def status(self) -> dict:
+        usable, why = self.vector_search()
+        llm = self.llm
+        payload = {
+            "repo": self.repo,
+            "root": str(self.root) if self.root else None,
+            "llm": None if isinstance(llm, UnavailableLLM) else getattr(llm, "name", None),
+            "llm_note": getattr(llm, "reason", None),
+            "embeddings": self.provider.name,
+            "vector_search": usable,
+            "vector_search_note": why or None,
+            "context_tokens": self.service.available,
+        }
+        try:
+            payload["graph"] = self.reader.stats(self.repo)
+        except Exception as exc:                   # noqa: BLE001 - status must answer
+            payload["graph"] = None
+            payload["neo4j_error"] = f"{type(exc).__name__}: {exc}"
+        return payload
 
 
 def build_runtime(
     repo: str,
     root: Path,
     *,
-    offline: bool,
+    offline: bool = False,
+    ai: str | None = None,
     driver=None,
     cache_path: Path | None = None,
     llm=None,
+    provider=None,
 ) -> Runtime:
     """Wire one repository's indexer, retriever and answering service.
 
-    `cache_path` and `llm` exist for tests: a test must neither write into the
-    developer's embedding cache nor send source to a provider.
+    `cache_path`, `llm` and `provider` exist for tests: a test must neither
+    write into the developer's embedding cache nor send source to a provider.
     """
     from api.app import InvestigationService
 
@@ -180,10 +372,14 @@ def build_runtime(
     database = NEO4J_DEFAULT_DATABASE
     apply_schema(driver, database)
 
+    mode = "off" if offline else (ai or "auto")
+    chosen_llm, chosen_provider, notes = choose_providers(mode)
+    llm = llm or chosen_llm
+    provider = provider or chosen_provider
+
     writer = GraphWriter(driver, database)
     reader = GraphReader(driver, database)
     tokenizer = ApproxCodeTokenizer()
-    provider, meaningful = _embedding_provider(offline)
     cache = EmbeddingCache(
         cache_path or EMBEDDING_CACHE_PATH,
         model=provider.name,
@@ -200,25 +396,32 @@ def build_runtime(
         hybrid=HybridRetriever(backend=Neo4jSearchBackend(driver, database)),
         expander=NeighborhoodExpander(runner=runner),
         structural=StructuralResolver(runner=runner),
-        embed_query=(lambda text: provider.embed([text])[0]) if meaningful else None,
         repo_root=root,
     )
     service = InvestigationService(
         retriever=retriever,
-        llm=llm or AnthropicProvider(),
+        llm=llm,
         tokenizer=tokenizer,
         graph_runner=runner,
         repo_id=repo,
         expander=retriever.expand,
+        available=context_budget(llm),
     )
-    return Runtime(driver=driver, indexer=indexer, service=service, retriever=retriever)
+    runtime = Runtime(
+        driver=driver, indexer=indexer, service=service, retriever=retriever,
+        repo=repo, root=root, reader=reader, notes=tuple(notes),
+    )
+    if getattr(provider, "semantic", False):
+        retriever.embed_query = runtime.embed_query
+    return runtime
 
 
 def _print_notes(notes: dict) -> None:
     route = notes.get("route_taken") or notes.get("route")
     print(f"# route: {route}", file=sys.stderr)
     if notes.get("vector_search") == "degraded":
-        print("# Semantic search degraded (embedding API unavailable)", file=sys.stderr)
+        reason = notes.get("vector_search_note") or "embedding model unavailable"
+        print(f"# Semantic search degraded ({reason})", file=sys.stderr)
     structural = notes.get("structural")
     if structural:
         line = (
@@ -228,6 +431,9 @@ def _print_notes(notes: dict) -> None:
         if structural.get("fallback"):
             line += f" — {structural['fallback']}; answered semantically"
         print(line, file=sys.stderr)
+        for item in structural.get("related", []):
+            print(f"#   {item['rel_path']}:{item['start_line']}  {item['qualified_name']}",
+                  file=sys.stderr)
     for frame in notes.get("frames", []):
         print(f"# {frame['badge']:<14} {frame['frame']}", file=sys.stderr)
 
@@ -247,11 +453,15 @@ def main(argv: list[str] | None = None) -> int:
         driver.verify_connectivity()
     except Exception as exc:                       # noqa: BLE001 - report, don't mask
         print(f"Neo4j unavailable at {NEO4J_URI}: {exc}", file=sys.stderr)
-        print("Start it with: docker compose up -d", file=sys.stderr)
+        print("Start it with: sei start   (or: docker compose up -d)", file=sys.stderr)
         driver.close()
         return 1
 
-    runtime = build_runtime(args.repo, args.root.resolve(), offline=args.offline, driver=driver)
+    runtime = build_runtime(
+        args.repo, args.root.resolve(), offline=args.offline, ai=args.ai, driver=driver
+    )
+    for note in runtime.notes:
+        print(f"# {note}", file=sys.stderr)
     try:
         return _run(args, runtime)
     finally:
@@ -277,7 +487,7 @@ def _run(args, runtime: Runtime) -> int:
         routed = runtime.service.router.route(args.question)
         seeds, neighbors, notes = runtime.retriever(args.question, routed)
         _print_notes(notes)
-        print(f"# Retrieval only (--offline). Model {LLM_MODEL} not called.\n")
+        print("# Retrieval only (--offline). No model was called.\n")
         for block in seeds:
             print(f"  {block.symbol.rel_path}::{block.symbol.qualified_name}")
         if neighbors:
@@ -286,39 +496,59 @@ def _run(args, runtime: Runtime) -> int:
                 print(f"  {block.symbol.rel_path}::{block.symbol.qualified_name}")
         return 0
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print(
-            "warning: ANTHROPIC_API_KEY not set; synthesis will be unavailable and "
-            "the answer is retrieval-only (§9.3).",
-            file=sys.stderr,
-        )
-
     from api.stream import SentenceEvent, TextEvent
 
+    # The answer streams as it is written; the verdicts follow it. A terminal
+    # cannot go back and badge a sentence once the next one has started, and
+    # badges printed mid-stream landed in the middle of the following sentence.
     result = None
+    verdicts: list[SentenceEvent] = []
     for event, result in runtime.service.stream(args.question):
         if isinstance(event, TextEvent):
             sys.stdout.write(event.text)
             sys.stdout.flush()
-        elif isinstance(event, SentenceEvent) and event.badge:
-            prefix = "  (amended) " if event.amends else "  "
-            sys.stdout.write(f"{prefix}{event.badge}\n")
+        elif isinstance(event, SentenceEvent):
+            if event.amends and verdicts:
+                verdicts[-1] = event
+            else:
+                verdicts.append(event)
         elif isinstance(event, dict) and event.get("type") == "retrieval":
             _print_notes(event)
         elif isinstance(event, dict) and event.get("type") == "retry":
-            print(f"\n\n# Refining… ({event['reason']})\n", file=sys.stderr)
+            verdicts.clear()
+            # On stdout, with the answer: the two attempts are one stream, and
+            # with the notice on stderr a redirected answer read as a single
+            # paragraph that contradicted itself halfway through.
+            print(f"\n\n# Refining… ({event['reason']})\n")
         elif isinstance(event, dict) and event.get("type") == "synthesis_unavailable":
             print(f"\n# Synthesis unavailable: {event['reason']}", file=sys.stderr)
             for block in event.get("blocks", []):
                 print(f"  [{block['handle']}] {block['rel_path']}::{block['qualified_name']}")
 
-    print("\n\n" + result.context.report())
+    claims = [v for v in verdicts if v.badge]
+    if claims:
+        print("\n\n# Claims")
+        for verdict in claims:
+            line = " ".join(verdict.text.split())
+            print(f"  {verdict.badge:<20} {line[:110]}{'…' if len(line) > 110 else ''}")
+    cited = {h for v in verdicts for h in v.handles}
+    sources = [p for p in result.context.blocks if p.handle and int(p.handle[1:]) in cited]
+    if sources:
+        # A handle is only worth citing if the reader can see what it names.
+        print("\n# Sources")
+        for packed in sources:
+            symbol = packed.block.symbol
+            print(f"  [{packed.handle}] {symbol.rel_path}:{symbol.start_line}  "
+                  f"{symbol.qualified_name}")
+    print("\n" + result.context.report())
     if result.report is not None:
         print(result.report.render())
+    cost = result.cost
     print(
         f"TTFT {result.ttft_seconds or 0:.2f}s · total {result.total_seconds or 0:.2f}s · "
-        f"{result.cost.packed_tokens if result.cost else 0} packed tokens · "
-        f"${result.cost.usd if result.cost else 0:.4f} ({LLM_MODEL}, {EMBED_MODEL})"
+        f"{cost.packed_tokens if cost else 0} packed tokens · "
+        f"${cost.usd if cost else 0:.4f} "
+        f"({cost.model if cost else 'no model'}, {runtime.provider.name})"
     )
     if result.retried:
         print("(answer was refined once — §6.3)")
@@ -331,7 +561,18 @@ def _serve(args, runtime: Runtime) -> int:
 
     from api.app import create_app
 
-    app = create_app(runtime.service, runtime.indexer, repos=[args.repo])
+    watcher = None
+    if getattr(args, "watch", False):
+        watcher = TreeWatcher(
+            indexer=runtime.indexer, repo=args.repo, root=runtime.root,
+            extensions=tuple(runtime.indexer.adapters),
+        )
+    app = create_app(
+        runtime.service, runtime.indexer, repos=[args.repo],
+        watcher=watcher,
+        bootstrap=runtime.bootstrap if watcher is not None else None,
+        status=runtime.status,
+    )
     print(f"serving {args.repo} ({args.root}) on http://{args.host}:{args.port}", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0

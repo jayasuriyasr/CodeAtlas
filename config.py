@@ -55,6 +55,59 @@ EMBED_DIM: int = 1536
 
 
 # --------------------------------------------------------------------------
+# Local models (decision 0003) — an Ollama server on this machine
+# --------------------------------------------------------------------------
+
+#: Where the local model server listens. Infrastructure, like the Neo4j URI.
+OLLAMA_URL: str = os.environ.get("SEI_OLLAMA_URL", "http://127.0.0.1:11434")
+
+#: Synthesis model when no ANTHROPIC_API_KEY is set. Chosen to fit a 4 GB GPU
+#: (1.9 GB of weights) while being trained on code. Free, private, and weaker
+#: than the hosted model decision 0002 names — see decision 0003.
+LOCAL_LLM_MODEL: str = os.environ.get("SEI_LOCAL_LLM", "qwen2.5-coder:3b")
+
+#: Embedding model when no VOYAGE_API_KEY is set. Emits 768 dimensions, which
+#: `OllamaEmbeddingProvider` zero-pads to EMBED_DIM (FINDINGS F-025).
+LOCAL_EMBED_MODEL: str = os.environ.get("SEI_LOCAL_EMBED", "nomic-embed-text")
+
+#: Context window the local model is loaded with (`num_ctx`). Unlike
+#: CTX_BUDGET — a quality parameter far below the hosted model's window — this
+#: is a capacity limit: past it the server silently drops the start of the
+#: prompt. 8,192 keeps the model, its cache and the embedder inside 4 GB.
+LOCAL_LLM_CONTEXT_TOKENS: int = 8_192
+
+#: Share of the local window the packer may plan to fill. The packer counts
+#: with the stand-in tokenizer (F-006). Measured against this model's own over
+#: the 93 fixture symbols (F-025), the stand-in *over*-counts: real/stand-in was
+#: 0.65 at the median and 0.94 at worst, never above 1. So the whole window is
+#: planned, and the plan is already conservative by a third.
+LOCAL_CONTEXT_HEADROOM: float = 1.0
+
+#: How long the server keeps a model in memory after a request. Reloading costs
+#: several seconds, which would land in every answer's time-to-first-token.
+LOCAL_KEEP_ALIVE: str = "30m"
+
+#: Texts per local embedding request.
+LOCAL_EMBED_BATCH_SIZE: int = 16
+
+#: Seconds a local request may take. Far longer than the hosted timeout because
+#: the first request after a boot loads the model from disk: 46 s was measured
+#: for a 274 MB embedder on a cold cache, before a single token was processed.
+LOCAL_TIMEOUT_SECONDS: float = 300.0
+
+#: Task prefixes an embedding model was trained with: (document, query). A
+#: model missing from this table gets none. Leaving nomic's out costs recall
+#: silently — the vectors are still returned, just for a task it was not asked.
+LOCAL_EMBED_PREFIXES: dict[str, tuple[str, str]] = {
+    "nomic-embed-text": ("search_document: ", "search_query: "),
+}
+
+#: Which providers to use: "auto" (hosted when its key is set, else local when
+#: the server answers, else none), "local", "cloud", or "off".
+AI_MODE: str = os.environ.get("SEI_AI", "auto")
+
+
+# --------------------------------------------------------------------------
 # † constants — spec §12.10. Unvalidated guesses. Expect all of these to move.
 # --------------------------------------------------------------------------
 
@@ -166,6 +219,11 @@ WRITE_CHUNK_SIZE: int = 1_000
 #: dropped either way — this only stops a dead database being polled forever.
 FLUSH_MAX_RETRIES: int = 3
 
+#: How often the file watcher looks at the working tree. A scan is a directory
+#: walk and a `stat` per source file — no file is read unless it changed — so a
+#: second is cheap, and §4.1's debounce still coalesces what the scans find.
+WATCH_INTERVAL_SECONDS: float = 1.0
+
 #: Texts per embedding request. Voyage accepts up to 128 inputs per call.
 EMBED_BATCH_SIZE: int = 128
 
@@ -176,6 +234,14 @@ PROVIDER_TIMEOUT_SECONDS: float = 60.0
 #: `queryNodes` is asked for this many times `k` before filtering on repo_id —
 #: otherwise a top-k can be entirely another tenant's rows.
 VECTOR_OVERFETCH_FACTOR: int = 4
+
+#: The over-fetch above is only a first guess: beside a repository twenty-five
+#: times its size, a 73-symbol repository got 0 to 11 of the 60 rows it asked
+#: for (FINDINGS F-028). The fetch is therefore widened by the same factor until
+#: the repository has its `k`, the index is exhausted, or this many neighbours
+#: have been asked for — past which the arm returns what it has and counts
+#: `retrieve.vector_starved`.
+VECTOR_MAX_FETCH: int = 16_384
 
 #: Most related symbols a STRUCTURAL traversal hands to the packer. The total is
 #: always reported; this bounds how many are loaded, not what the answer says

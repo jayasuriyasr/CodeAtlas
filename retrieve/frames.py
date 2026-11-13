@@ -76,11 +76,27 @@ _PY_HEADER = re.compile(r"^\s*Traceback \(most recent call last\)", re.M)
 _PY_FRAME = re.compile(
     r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<fn>[^\s]+)', re.M
 )
-#: `at fn (path:line:col)` and the bare `at path:line:col` form.
+#: `at fn (path:line:col)` and the bare `at path:line:col` form, as V8 prints
+#: them: optionally `async`, optionally `new`, optionally `fn [as alias]`.
+#:
+#: The path may open with a scheme or a drive letter — `file:///C:/app/x.js`,
+#: `webpack-internal:///./src/x.ts`, `node:internal/…`, `C:\app\x.js` — each of
+#: which contains a colon that is not the one before the line number. Without
+#: `async` every awaited Next.js route handler's frame was dropped before
+#: resolution was tried, and without the drive letter so was every frame of a
+#: trace recorded on Windows (FINDINGS F-027).
 _JS_FRAME = re.compile(
-    r"^\s*at\s+(?:(?P<fn>[^\s(]+)\s+\()?(?P<path>[^\s():]+):(?P<line>\d+):(?P<col>\d+)\)?",
+    r"^\s*at\s+(?:async\s+)?"
+    r"(?:(?:new\s+)?(?P<fn>[^\s(]+)(?:\s+\[as\s+[^\]\n]+\])?\s+\()?"
+    r"(?P<path>(?:[A-Za-z][A-Za-z0-9+.-]*:/*)?(?:[A-Za-z]:)?[^\s():]+)"
+    r":(?P<line>\d+):(?P<col>\d+)\)?",
     re.M,
 )
+
+#: What V8 prints in front of a method when the receiver has no class of its
+#: own: an object literal's method is `Object.save`, a static one
+#: `Function.save`. The prefix names no symbol, so the name is matched bare.
+_V8_RECEIVERS = ("Object.", "Function.", "Module.", "exports.")
 _JS_ANON = re.compile(r"^\s*at\s+(?P<fn><[^>]+>)\s*$", re.M)
 
 #: Names a minifier produced, or the runtime invented. §5.1 lists `at t (…)` and
@@ -300,7 +316,7 @@ class FrameResolver:
             metrics.incr("trace.mangled_skipped")
             return ResolvedFrame(frame, None, "unresolved", 0.0)
 
-        cands = list(self.reader.symbols_named(repo_id, frame.fn_name))
+        cands = self._named(repo_id, frame.fn_name)
         if len(cands) == 1:
             metrics.incr("trace.tier2.resolved")
             metrics.incr("frames_resolved_by_tier.name")
@@ -308,6 +324,39 @@ class FrameResolver:
 
         metrics.incr("trace.tier2.ambiguous" if cands else "trace.tier2.miss")
         return ResolvedFrame(frame, None, "unresolved", 0.0)
+
+    def _named(self, repo_id: str, fn_name: str) -> list:
+        """The symbols a frame's function name could mean.
+
+        Narrower than "every symbol with that name", in two ways that both
+        *remove* candidates — neither is a guess, and more than one survivor is
+        still a refusal:
+
+        * A frame names code that ran, so a module is never a candidate. By
+          React convention `UserCard.tsx` exports `UserCard`; counting the
+          module made every such component ambiguous with its own file.
+        * JavaScript prints a method as `Class.method`. The symbol's `name` is
+          `method`, so the lookup is on the last segment and the candidates are
+          those whose qualified name ends with the whole dotted name.
+        """
+        name = fn_name
+        for receiver in _V8_RECEIVERS:
+            if name.startswith(receiver) and len(name) > len(receiver):
+                name = name[len(receiver):]
+                break
+        leaf = name.rsplit(".", 1)[-1]
+        if is_mangled(leaf):
+            return []                    # `Object.t` is as minified as `t`
+        cands = [
+            c for c in self.reader.symbols_named(repo_id, leaf)
+            if getattr(c, "kind", "") != "module"
+        ]
+        if "." in name:
+            cands = [
+                c for c in cands
+                if c.qualified_name == name or c.qualified_name.endswith("." + name)
+            ]
+        return cands
 
 
 # --------------------------------------------------------------------------

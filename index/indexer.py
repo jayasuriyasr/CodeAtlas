@@ -34,10 +34,12 @@ from adapters.python import PythonAdapter
 from config import BULK_THRESHOLD, DEBOUNCE_SECONDS, FLUSH_MAX_RETRIES
 from index.cache import (
     EmbeddingCache,
+    EmbeddingDisabled,
     EmbeddingProvider,
     EmbeddingUnavailable,
     cached_vectors,
     embed_batch,
+    embedder_key,
 )
 from index.chunker import Tokenizer, chunk_file
 from index.moves import Move, Remap, collapse_chains, parse_git_renames, resolve_moves
@@ -141,9 +143,24 @@ def walk_working_tree(root: Path, extensions: Iterable[str]) -> dict[str, str]:
     quiet disagreement between what is indexed and what a developer sees.
     """
     root = Path(root)
-    suffixes = tuple(extensions)
     tree: dict[str, str] = {}
+    for rel in list_indexable(root, extensions):
+        try:
+            tree[rel] = content_hash((root / rel).read_bytes())
+        except OSError:
+            metrics.incr("reconcile.unreadable")     # deleted mid-walk
+    return tree
 
+
+def list_indexable(root: Path, extensions: Iterable[str]) -> list[str]:
+    """Every indexable path under `root`, POSIX and repo-relative.
+
+    The one definition of "what belongs in the index", shared by the reconcile
+    walk and the file watcher — two answers to that question would have the
+    watcher indexing a file the next reconcile deletes.
+    """
+    root = Path(root)
+    suffixes = tuple(extensions)
     if _is_git_repo(root):
         listing = _run_git(
             root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
@@ -156,15 +173,7 @@ def walk_working_tree(root: Path, extensions: Iterable[str]) -> dict[str, str]:
             if path.is_file()
             and not (_DEFAULT_IGNORES & set(path.relative_to(root).parts))
         ]
-
-    for rel in candidates:
-        if not rel.endswith(suffixes):
-            continue
-        try:
-            tree[rel] = content_hash((root / rel).read_bytes())
-        except OSError:
-            metrics.incr("reconcile.unreadable")     # deleted mid-walk
-    return tree
+    return [rel for rel in candidates if rel.endswith(suffixes)]
 
 
 def _chunked(items: list, size: int):
@@ -213,6 +222,8 @@ class Indexer:
     _tasks: set[asyncio.Task] = field(default_factory=set, init=False)
     #: Consecutive failed flushes per repo, for `_requeue`'s backoff.
     _failures: dict[str, int] = field(default_factory=dict, init=False)
+    #: Repos whose last embedding call fell back to cached vectors only.
+    _degraded: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         if not self.adapters:
@@ -252,6 +263,21 @@ class Indexer:
             batch = list(self._tasks)
             await asyncio.gather(*batch, return_exceptions=True)
             self._tasks.difference_update(task for task in batch if task.done())
+
+    async def settle(self) -> None:
+        """Wait until nothing is armed and nothing is flushing.
+
+        `join` waits for flushes that have *started*; a save inside its
+        debounce window has only a timer. A caller that must act after the
+        graph reflects every event so far — the watcher, before it reconciles
+        deletions — needs both.
+        """
+        loop = asyncio.get_running_loop()
+        while self._timers or self._tasks:
+            if self._timers:
+                due = min(handle.when() for handle in self._timers.values())
+                await asyncio.sleep(max(0.0, due - loop.time()) + 0.01)
+            await self.join()
 
     # -- inbound events ----------------------------------------------------
 
@@ -430,7 +456,9 @@ class Indexer:
         except RuntimeError:
             pass                                    # no running loop: next save re-arms
 
-    async def _embed(self, repo: str, batch: dict[str, ParsedFile]) -> dict[str, Vector]:
+    async def _embed(
+        self, repo: str, batch: dict[str, ParsedFile], *, rewrite: bool = False
+    ) -> dict[str, Vector]:
         """Chunk, then embed. §4.2's `embed_batch` reads `chunk_text`.
 
         Chunking happens here rather than at parse time because it is where
@@ -448,20 +476,38 @@ class Indexer:
         their next write — the next save of the file, or Sync Project — embeds
         them. A symbol that already had a vector keeps it (`symbol_props` never
         sends a null), which is §9.3's "stale", not "missing".
+
+        **One embedder per repository.** If this repository's vectors were
+        written by a different model (`embedder_key`), an incremental write
+        adds none: a few vectors from a second model would sit in the first
+        model's index and be compared as if they belonged. Only a `rewrite` —
+        a reconcile that re-embeds every file — may change the embedder.
         """
         for parsed in batch.values():
             chunk_file(parsed, self.tokenizer)
             for sym in parsed.symbols:
                 sym.search_text = build_search_text(sym)
+        if not rewrite and not self._embedder_matches(repo):
+            metrics.incr("index.embedder_mismatch")
+            return {}
         try:
             return await asyncio.to_thread(
                 embed_batch, repo, batch,
                 cache=self.cache, provider=self.provider, reader=self.reader,
             )
-        except EmbeddingUnavailable:
-            _log.warning("embedding provider unavailable; indexing %r with cached vectors only", repo)
-            metrics.incr("index.embedding_unavailable")
+        except EmbeddingUnavailable as exc:
+            self._degraded.add(repo)
+            if not isinstance(exc, EmbeddingDisabled):
+                _log.warning(
+                    "embedding provider unavailable; indexing %r with cached vectors only",
+                    repo,
+                )
+                metrics.incr("index.embedding_unavailable")
             return await asyncio.to_thread(cached_vectors, batch, self.cache)
+
+    def _embedder_matches(self, repo: str) -> bool:
+        recorded = self.cache.get_meta(embedder_key(repo))
+        return recorded is None or recorded == self.provider.name
 
     # -- reconcile (§4.5) --------------------------------------------------
 
@@ -496,6 +542,10 @@ class Indexer:
             walk_working_tree, root, tuple(self.adapters)
         )
         known = await asyncio.to_thread(self.reader.file_hashes, repo)
+        # Every file is about to be embedded afresh: the one moment the
+        # repository's embedder may change, and the moment to record it.
+        rewrite = reparse_all or not known
+        self._degraded.discard(repo)
 
         added = [p for p in tree if p not in known]
         if reparse_all:
@@ -516,7 +566,7 @@ class Indexer:
 
         chunks = list(_chunked(sorted(added + modified), self.bulk_threshold))
         for chunk in chunks:
-            await self._reconcile_chunk(repo, chunk, epoch)
+            await self._reconcile_chunk(repo, chunk, epoch, rewrite)
 
         if deleted:                                  # steps 4-5 remove them
             await asyncio.to_thread(
@@ -526,13 +576,17 @@ class Indexer:
         if len(chunks) > 1:
             metrics.incr("reconcile.chunks_replayed", len(chunks) - 1)
             for chunk in chunks[:-1]:
-                await self._reconcile_chunk(repo, chunk, epoch)
+                await self._reconcile_chunk(repo, chunk, epoch, rewrite)
 
         # One repo-wide pass beats N local ones after a bulk change.
         await asyncio.to_thread(self.writer.refresh_all_degrees, repo)
         self._indexed[repo] = set(tree)
+        if rewrite and repo not in self._degraded:
+            self.cache.set_meta(embedder_key(repo), self.provider.name)
 
-    async def _reconcile_chunk(self, repo: str, chunk: list[str], epoch: int) -> None:
+    async def _reconcile_chunk(
+        self, repo: str, chunk: list[str], epoch: int, rewrite: bool = False
+    ) -> None:
         """Parse, embed and write one reconcile chunk under `epoch`."""
         parsed = {}
         for rel in chunk:
@@ -545,7 +599,7 @@ class Indexer:
                 parsed[rel] = one
         if not parsed:
             return
-        vectors = await self._embed(repo, parsed)
+        vectors = await self._embed(repo, parsed, rewrite=rewrite)
         await asyncio.to_thread(
             self.writer.apply, repo, parsed, set(parsed), vectors, epoch
         )
@@ -603,6 +657,15 @@ class Indexer:
         return count
 
     # -- manual triggers (§4.1) -------------------------------------------
+
+    async def reconcile(self, repo: str) -> None:
+        """§4.5 on demand, outside a flush: `post-checkout`, and the watcher.
+
+        Diff-only, under the repo's lock — the reconcile the bulk branch runs,
+        reachable by a caller that is not already holding the lock.
+        """
+        async with self._locks[repo]:
+            await self.full_reconcile(repo)
 
     async def sync_project(self, repo: str) -> None:
         """The Sync Project button.

@@ -17,7 +17,8 @@ The pipeline follows §7's diagram: route -> resolve/retrieve -> expand -> pack
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Sequence
+from pathlib import Path
+from typing import Awaitable, Callable, Iterator, Sequence
 
 import metrics
 from adapters.base import Symbol
@@ -60,11 +61,17 @@ class AnswerCost:
     model: str = LLM_MODEL
     input_tokens: int | None = None
     generations: int = 1
+    #: `(input, output)` dollars per million tokens, when the provider states
+    #: its own — a local model's are zero. None means decision 0002's rate card.
+    rates: tuple[float, float] | None = None
 
     @property
     def usd(self) -> float:
-        rate_in = LLM_INPUT_RATE_USD_PER_MTOK or 0.0
-        rate_out = LLM_OUTPUT_RATE_USD_PER_MTOK or 0.0
+        if self.rates is not None:
+            rate_in, rate_out = self.rates
+        else:
+            rate_in = LLM_INPUT_RATE_USD_PER_MTOK or 0.0
+            rate_out = LLM_OUTPUT_RATE_USD_PER_MTOK or 0.0
         billed_in = self.packed_tokens if self.input_tokens is None else self.input_tokens
         return (billed_in * rate_in + self.output_tokens * rate_out) / 1_000_000
 
@@ -147,12 +154,18 @@ class InvestigationService:
             event = {"type": "retrieval", **notes}
             result.events.append(event)
             yield (event, result)
+        event = _context_event(context)
+        result.events.append(event)
+        yield (event, result)
 
         known_names = frozenset(
             p.block.symbol.qualified_name for p in context.blocks
         )
 
-        prompt = build_prompt(question, context)
+        # A provider may ask for its answer format to be restated after the
+        # context — small local models need it (`api.prompt`); hosted ones do not.
+        reminder = getattr(self.llm, "answer_format", "")
+        prompt = build_prompt(question, context, reminder=reminder)
         try:
             yield from self._generate(result, SYSTEM, prompt, known_names, started)
         except SynthesisUnavailable as exc:
@@ -179,12 +192,16 @@ class InvestigationService:
             event = {"type": "retry", "reason": plan.reason, "added_blocks": len(added)}
             result.events.append(event)
             yield (event, result)
+            event = _context_event(retry_context, retry=True)
+            result.events.append(event)
+            yield (event, result)
             try:
                 yield from self._generate(
                     result,
                     SYSTEM,
                     build_retry_prompt(
-                        question, retry_context, plan.reason, added_context=bool(added)
+                        question, retry_context, plan.reason,
+                        added_context=bool(added), reminder=reminder,
                     ),
                     known_names,
                     started,
@@ -200,11 +217,16 @@ class InvestigationService:
                 yield (event, result)
 
         result.total_seconds = time.perf_counter() - started
+        # A provider that states its own rates is billed under its own name;
+        # one that states none is the model decision 0002 prices.
+        rates = getattr(self.llm, "rates", None)
         result.cost = AnswerCost(
             packed_tokens=result.context.packed_tokens,
             output_tokens=result.output_tokens,
             input_tokens=result.input_tokens,
             generations=result.generations,
+            model=getattr(self.llm, "name", LLM_MODEL) if rates is not None else LLM_MODEL,
+            rates=rates,
         )
         metrics.incr("answer.packed_tokens", result.context.packed_tokens)
         # §6.3's last line: a retry that still fails is surfaced honestly, not
@@ -220,6 +242,20 @@ class InvestigationService:
                 "context": result.context.report(),
                 "retried": result.retried,
                 "needs_review": needs_review,
+                "coverage": result.report.coverage,
+                "relation_precision": result.report.relation_precision,
+                "conflict_flags": result.report.conflict_flags,
+                # T1's count. Coverage (§6.2) counts a sentence as cited when
+                # it carries a handle at all, so "100% cited" can sit beside a
+                # citation of a block that was never shown; the console has to
+                # be able to say so next to the number.
+                "unknown_citations": len(result.report.handle_errors),
+                "ttft_seconds": result.ttft_seconds,
+                "total_seconds": result.total_seconds,
+                "model": result.cost.model,
+                "usd": result.cost.usd,
+                "input_tokens": result.cost.input_tokens,
+                "output_tokens": result.cost.output_tokens,
             },
             result,
         )
@@ -371,6 +407,35 @@ def _uids(context: PackedContext) -> set[str]:
     return {p.uid for p in context.blocks}
 
 
+def _context_event(context: PackedContext, *, retry: bool = False) -> dict:
+    """The packed blocks, exactly as the model is about to see them.
+
+    §12.4 says the trust model rests on the citation badge. A badge the reader
+    cannot check is a decoration, so the stream carries what each handle points
+    at — the rendered text, the file and the lines — before the first token of
+    the answer that cites it.
+    """
+    return {
+        "type": "context",
+        "retry": retry,
+        "report": context.report(),
+        "blocks": [
+            {
+                "handle": p.handle,
+                "uid": p.uid,
+                "qualified_name": p.block.symbol.qualified_name,
+                "rel_path": p.block.symbol.rel_path,
+                "start_line": p.block.symbol.start_line,
+                "end_line": p.block.symbol.end_line,
+                "kind": p.block.symbol.kind,
+                "level": p.level,
+                "text": p.text,
+            }
+            for p in context.blocks
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -396,8 +461,23 @@ def sse(event: object) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def create_app(service: InvestigationService, indexer=None, repos: Sequence[str] = ()):
-    """The FastAPI surface: ask, the §4.4 rename ingress, and Sync Project.
+#: The console: one self-contained page, no build step and no CDN, so it works
+#: with the network cable out. Plan §9's cut ladder dropped the Next.js console
+#: for the CLI; this is the smallest thing that puts §6.4's badges and §5.4's
+#: packing report in front of someone who is not at a terminal.
+CONSOLE_PAGE = Path(__file__).parent / "static" / "index.html"
+
+
+def create_app(
+    service: InvestigationService,
+    indexer=None,
+    repos: Sequence[str] = (),
+    *,
+    watcher=None,
+    bootstrap: Callable[[], Awaitable[None]] | None = None,
+    status: Callable[[], dict] | None = None,
+):
+    """The FastAPI surface: the console, ask, rename ingress, Sync Project.
 
     The indexing routes are `async def` on purpose. `Indexer.on_rename` arms a
     debounce timer on the running event loop (§4.1); a plain `def` route runs in
@@ -407,11 +487,18 @@ def create_app(service: InvestigationService, indexer=None, repos: Sequence[str]
     `repos` are the repositories whose `_indexed` set is seeded at startup
     (§4.1 `startup`) — without it every first flush pays for Signal B's git
     subprocess.
+
+    `watcher` (an `index.watcher.TreeWatcher`) runs for the life of the server:
+    `bootstrap` first, to bring the graph level with the tree, then polling.
+    It runs as a task rather than in start-up proper so the server answers —
+    and `/status` can say "indexing" — while a first index is still under way.
+    `status` supplies what `/status` reports about providers and the graph.
     """
+    import asyncio
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import HTMLResponse, StreamingResponse
     from pydantic import BaseModel
 
     @asynccontextmanager
@@ -419,11 +506,51 @@ def create_app(service: InvestigationService, indexer=None, repos: Sequence[str]
         if indexer is not None and hasattr(indexer, "startup"):
             for repo in repos:
                 await indexer.startup(repo)
+        task = None
+        if watcher is not None:
+            task = asyncio.create_task(watcher.run(bootstrap))
+        elif bootstrap is not None:
+            task = asyncio.create_task(bootstrap())
         yield
+        if watcher is not None:
+            watcher.stop()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if indexer is not None and hasattr(indexer, "aclose"):
             await indexer.aclose()
 
     app = FastAPI(title="SEI", lifespan=lifespan)
+
+    @app.get("/", response_class=HTMLResponse)
+    def console():
+        # Read per request: the page is one small file, and an edit to it
+        # should not need the server (and its warm model) restarted.
+        return HTMLResponse(CONSOLE_PAGE.read_text(encoding="utf-8"))
+
+    @app.get("/status")
+    def get_status():
+        """What is answering, from what, and how current the index is."""
+        payload = {"ok": True, "repos": list(repos)}
+        # The watcher is read *before* the rest. This route runs on a worker
+        # thread while the first index finishes on the event loop, so the two
+        # reads are two instants. In the other order a response could say
+        # "watching" over figures taken while it was still indexing — seen as
+        # `vector_search: false` beside a finished index. This way the state is
+        # never ahead of the numbers it sits beside.
+        watching = None
+        if watcher is not None:
+            watching = {
+                "state": watcher.state,
+                "error": watcher.last_error,
+                "files_watched": watcher.files_watched,
+                "last_change_at": watcher.last_change_at,
+            }
+        if status is not None:
+            payload.update(status())
+        if watching is not None:
+            payload["watcher"] = watching
+        return payload
 
     class Ask(BaseModel):
         question: str

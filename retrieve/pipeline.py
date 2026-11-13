@@ -104,11 +104,12 @@ class QueryRetriever:
             return None
         try:
             vec = self.embed_query(text)
-        except EmbeddingUnavailable:
+        except EmbeddingUnavailable as exc:
             # §9.3: "Embedding API -> Fulltext + graph expansion", and the user
-            # is told "Semantic search degraded".
+            # is told "Semantic search degraded" — and why, when it is known.
             metrics.incr("retrieve.embedding_unavailable")
             notes["vector_search"] = "degraded"
+            notes["vector_search_note"] = str(exc)
             return None
         notes.setdefault("vector_search", "on")
         return vec
@@ -137,6 +138,15 @@ class QueryRetriever:
         stubs = self._blocks(
             [(uid, 1.0 - i / (n + 1)) for i, uid in enumerate(related[full_slots:])]
         )
+        # The traversal *is* the answer (§5.1), so its result goes out as data,
+        # not only as context for a model to paraphrase: a model that names two
+        # of three callers must not be the reader's only source for the third.
+        entity = set(answer.entity_uids)
+        notes["structural"]["related"] = [
+            {"qualified_name": b.symbol.qualified_name, "rel_path": b.symbol.rel_path,
+             "start_line": b.symbol.start_line}
+            for b in [*seeds, *stubs] if b.uid not in entity
+        ]
         return seeds, stubs
 
     # -- TRACE ---------------------------------------------------------------
