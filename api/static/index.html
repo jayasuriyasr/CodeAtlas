@@ -416,6 +416,8 @@ function handleEvent(turn, ev) {
         bits.push(`relations verified <b>${Math.round(ev.relation_precision * 100)}%</b>`);
         if (ev.unknown_citations) bits.push(`<span class="review">${ev.unknown_citations} citation`
           + `${ev.unknown_citations > 1 ? "s point" : " points"} at code that was not shown</span>`);
+        if (ev.unsupported_claims) bits.push(`<span class="review">${ev.unsupported_claims} cited claim`
+          + `${ev.unsupported_claims > 1 ? "s name" : " names"} code its citation does not contain</span>`);
         if (ev.conflict_flags) bits.push(`<span class="review">${ev.conflict_flags} claim(s) contradict the graph</span>`);
         if (ev.ttft_seconds != null) bits.push(`first word <b>${ev.ttft_seconds.toFixed(1)}s</b>`);
         if (ev.total_seconds != null) bits.push(`total <b>${ev.total_seconds.toFixed(1)}s</b>`);

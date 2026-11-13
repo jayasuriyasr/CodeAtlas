@@ -251,6 +251,8 @@ class InvestigationService:
                 # citation of a block that was never shown; the console has to
                 # be able to say so next to the number.
                 "unknown_citations": len(result.report.handle_errors),
+                # Cited claims naming code that is not in the blocks they cite.
+                "unsupported_claims": len(result.report.unsupported),
                 "ttft_seconds": result.ttft_seconds,
                 "total_seconds": result.total_seconds,
                 "model": result.cost.model,
@@ -373,6 +375,7 @@ class InvestigationService:
             runner=self.graph_runner,
             repo_id=self.repo_id,
             retry_count=retry_count,
+            block_text={p.handle: p.text for p in result.context.blocks if p.handle},
         )
 
 

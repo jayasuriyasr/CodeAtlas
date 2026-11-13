@@ -80,6 +80,8 @@ class Outcome:
     relations_verified: int = 0
     conflict_flags: int = 0
     unknown_citations: int = 0
+    #: Cited claims naming code their cited blocks do not contain.
+    unsupported: int = 0
     retried: bool = False
     needs_review: bool = False
     ttft: float | None = None
@@ -254,6 +256,7 @@ def measure_answer(runtime, question: dict, gold_uids: set[str]) -> Outcome:
     outcome.relations_verified = sum(1 for v in report.relation_verdicts if v.verified)
     outcome.conflict_flags = report.conflict_flags
     outcome.unknown_citations = len(report.handle_errors)
+    outcome.unsupported = len(report.unsupported)
     outcome.usd = result.cost.usd
     outcome.needs_review = result.retried and (
         report.coverage < config.COVERAGE_RETRY_THRESHOLD or report.conflict_flags > 0)
@@ -326,6 +329,9 @@ def render(run: LocalRun) -> str:
         f"Citations of a block that was never shown (T1): "
         f"{sum(o.unknown_citations for o in answered)}. Coverage counts those "
         f"sentences as cited (§6.2); the console flags each one.",
+        f"Cited but unsupported — a cited claim naming code that none of its cited "
+        f"blocks contains: {sum(o.unsupported for o in answered)} of "
+        f"{sum(o.cited for o in answered)} cited claims. Coverage counts them as cited.",
         f"Relation Precision is over {relations} relation claims the answers made "
         f"({sum(o.conflict_flags for o in answered)} contradicted the graph)."
         + ("" if relations else

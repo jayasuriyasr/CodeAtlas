@@ -574,6 +574,10 @@ def _run(args, runtime: Runtime) -> int:
     print("\n" + result.context.report())
     if result.report is not None:
         print(result.report.render())
+        for sentence, missing in result.report.unsupported:
+            line = " ".join(sentence.split())
+            print(f"  ⚠ cited but unsupported ({', '.join(missing)} not in the cited code): "
+                  f"{line[:90]}{'…' if len(line) > 90 else ''}")
     cost = result.cost
     print(
         f"TTFT {result.ttft_seconds or 0:.2f}s · total {result.total_seconds or 0:.2f}s · "

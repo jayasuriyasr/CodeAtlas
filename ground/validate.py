@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 import metrics
 from config import COVERAGE_RETRY_THRESHOLD, EDGE_TYPE_ALLOWLIST, MAX_RETRIES
-from ground.classify import ClassifiedAnswer, Sentence, classify
+from ground.classify import HANDLE_RE, ClassifiedAnswer, Sentence, classify
 
 # --------------------------------------------------------------------------
 # T1 — the handle exists
@@ -261,12 +261,82 @@ def verify_relations(
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Support — does the cited block contain what the sentence names?
+# --------------------------------------------------------------------------
+
+#: Inline code, and bare words that are shaped like code: dotted names,
+#: snake_case with an underscore, CamelCase with a second capital. Plain words
+#: are not, on purpose — "token" in prose names nothing.
+_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_CODE_WORD = re.compile(
+    r"(?<![\w.])(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[a-z][a-z0-9]*_[a-z0-9_]+"
+    r"|[A-Z][a-z0-9]+[A-Z]\w*)(?![\w(])"
+)
+_IDENTIFIER = re.compile(r"[A-Za-z_][\w.]*")
+#: Words a sentence may put in code style without naming anything in the repo.
+_NOT_A_NAME = frozenset({
+    "None", "True", "False", "null", "undefined", "true", "false", "self", "cls", "this",
+})
+
+
+def _code_names(text: str) -> list[str]:
+    """Every code name a sentence mentions, in order, without repeats."""
+    names: list[str] = []
+    stripped = HANDLE_RE.sub(" ", text)
+    for span in _INLINE_CODE.findall(stripped):
+        names += _IDENTIFIER.findall(span)
+    names += _CODE_WORD.findall(_INLINE_CODE.sub(" ", stripped))
+    seen: list[str] = []
+    for name in names:
+        name = name.strip(".")
+        if name and name not in _NOT_A_NAME and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _appears(name: str, text: str) -> bool:
+    """Every dotted part of `name` occurs in `text` as a whole word.
+
+    A method's block says `class LoginView` and `def post`; it never spells
+    `LoginView.post`, so the parts are what must be there.
+    """
+    return all(re.search(rf"(?<![\w]){re.escape(part)}(?![\w])", text)
+               for part in name.split(".") if part and part not in _NOT_A_NAME)
+
+
+def unsupported_claims(
+    answer: ClassifiedAnswer, block_text: Mapping[str, str]
+) -> list[tuple[Sentence, tuple[str, ...]]]:
+    """Cited claims whose code names do not appear in the blocks they cite.
+
+    Returns `(sentence, missing_names)` pairs. Only cited claims with at least
+    one valid handle are judged: an uncited claim is T2's finding and a handle
+    that names no block is T1's, and counting either twice would inflate this.
+    """
+    out = []
+    for sentence in answer.cited_claims:
+        cited = [block_text[f"C{h}"] for h in sentence.handles if f"C{h}" in block_text]
+        if not cited:
+            continue
+        pooled = "\n".join(cited)
+        missing = tuple(name for name in _code_names(sentence.text) if not _appears(name, pooled))
+        if missing:
+            out.append((sentence, missing))
+    if out:
+        metrics.incr("ground.unsupported", len(out))
+    return out
+
+
 @dataclass
 class GroundingReport:
     answer: ClassifiedAnswer
     handle_errors: list[HandleError] = field(default_factory=list)
     relation_verdicts: list[RelationVerdict] = field(default_factory=list)
     retry_count: int = 0
+    #: Cited claims naming code their cited blocks do not contain, with the
+    #: missing names. Reported beside Coverage, which keeps its definition.
+    unsupported: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
     @property
     def coverage(self) -> float:
@@ -330,6 +400,7 @@ def ground(
     runner: Runner | None = None,
     repo_id: str = "",
     retry_count: int = 0,
+    block_text: Mapping[str, str] | None = None,
 ) -> GroundingReport:
     """Run T1, T2 and T3 over one answer.
 
@@ -342,6 +413,9 @@ def ground(
 
     report = GroundingReport(answer=answer, retry_count=retry_count)
     report.handle_errors = validate_handles(answer, handle_map)
+    if block_text:
+        report.unsupported = [(s.text, missing)
+                              for s, missing in unsupported_claims(answer, block_text)]
 
     claims = extract_relation_claims(answer)
     if claims and runner is not None:
