@@ -196,6 +196,7 @@ def test_all_ten_gates_are_recorded(golden, fixtures_dir, tmp_path):
         notes=[
             f"T2 classifier measured over {annotated_sentences} hand-annotated "
             f"sentences across all 45 golden questions.",
+            "T2 classifier precision and recall are measured on the golden set's reference answers — sentences the author wrote — with the gold symbols passed as known names. They show the classifier agrees with its author on clean prose; its accuracy on real model output is not measured.",
             "Embedding cache hit rate measured over a real double index of the "
             "Django fixture (73 symbols, 18 files).",
             "Context drop rate and p50 packed tokens measured with the "

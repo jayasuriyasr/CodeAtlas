@@ -27,6 +27,12 @@ import metrics
 GREATER = ">="
 LESS = "<="
 
+#: What the T2 classifier rows are measured on, printed in their source
+#: column. The golden set's reference answers are sentences the author wrote,
+#: and the gold symbols are passed to the classifier as known names — clean
+#: prose with every name it needs. Accuracy on real model output is unmeasured.
+CLASSIFIER_SOURCE = "author's reference sentences, not model output"
+
 
 @dataclass(frozen=True)
 class Gate:
@@ -128,8 +134,13 @@ def build_gates(
     cost_p50: float | None = None,
     cost_p95: float | None = None,
     source: str = "",
+    classifier_source: str = CLASSIFIER_SOURCE,
 ) -> list[Gate]:
-    """§8.2's table, in its order, with its stated thresholds."""
+    """§8.2's table, in its order, with its stated thresholds.
+
+    `classifier_source` labels the two T2 rows separately from `source`:
+    they are measured on different material from every other row.
+    """
     return [
         Gate("Recall@10 (packed context)", "retrieval failure",
              config.GATE_RECALL_AT_10, GREATER, recall_at_10, source),
@@ -138,9 +149,11 @@ def build_gates(
         Gate("Citation Coverage", "asserting without support",
              config.GATE_CITATION_COVERAGE, GREATER, coverage, source),
         Gate("T2 classifier precision", "whether Coverage means anything",
-             config.GATE_CLASSIFIER_PRECISION, GREATER, classifier_precision, source),
+             config.GATE_CLASSIFIER_PRECISION, GREATER, classifier_precision,
+             classifier_source),
         Gate("T2 classifier recall", "whether Coverage means anything",
-             config.GATE_CLASSIFIER_RECALL, GREATER, classifier_recall, source),
+             config.GATE_CLASSIFIER_RECALL, GREATER, classifier_recall,
+             classifier_source),
         Gate("Relation Precision", "misreading correct context",
              config.GATE_RELATION_PRECISION, GREATER, relation_precision, source),
         Gate("Embedding cache hit rate", "silent cache-key regression",

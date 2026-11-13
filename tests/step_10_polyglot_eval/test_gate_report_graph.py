@@ -255,6 +255,7 @@ def test_the_full_gate_table_is_recorded(golden, corpus, graph_db, fixtures_dir,
         notes=[
             f"Neo4j: measured against a live server. T2 classifier over "
             f"{annotated} hand-annotated sentences from all 45 golden questions.",
+            "T2 classifier precision and recall are measured on the golden set's reference answers — sentences the author wrote — with the gold symbols passed as known names. They show the classifier agrees with its author on clean prose; its accuracy on real model output is not measured.",
             "Recall@10 and MRR are against **packed** context (§8.1), the "
             "fulltext arm only — the vector arm is HashEmbeddingProvider, which "
             "has no semantic structure (F-009). A real embedding provider can "
