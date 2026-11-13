@@ -71,6 +71,19 @@ $ServerState = Join-Path $RunDir "server.json"
 
 function Say([string] $text) { Write-Host "sei: $text" }
 
+function New-Token {
+    # The server answers only requests carrying this run's token (api/cli.py).
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return ([Convert]::ToBase64String($bytes) -replace '\+', '-' -replace '/', '_').TrimEnd('=')
+}
+
+function Get-AuthHeaders($state) {
+    if ($state -and $state.token) { return @{ Authorization = "Bearer $($state.token)" } }
+    return @{}
+}
+
 function Test-Port([int] $port) {
     $client = New-Object System.Net.Sockets.TcpClient
     try {
@@ -262,10 +275,12 @@ function Invoke-Start {
     $err = Join-Path $LogDir "sei.err.log"
     Say "starting SEI for '$repoId' ($project)..."
     $env:PYTHONIOENCODING = "utf-8"
+    $token = New-Token
+    $env:SEI_API_TOKEN = $token
     $server = Start-Process -FilePath $Python -WorkingDirectory $Root -WindowStyle Hidden -PassThru `
         -ArgumentList @("-m", "api.cli", "--repo", $repoId, "--root", "`"$project`"", "--serve", "--watch", "--port", "$Port") `
         -RedirectStandardOutput $out -RedirectStandardError $err
-    @{ pid = $server.Id; repo = $repoId; root = $project; port = $Port } |
+    @{ pid = $server.Id; repo = $repoId; root = $project; port = $Port; token = $token } |
         ConvertTo-Json | Out-File $ServerState -Encoding ascii
 
     if (-not (Wait-Port $Port 90 "SEI")) {
@@ -273,7 +288,7 @@ function Invoke-Start {
         if (Test-Path $err) { Get-Content $err -Tail 15 }
         exit 1
     }
-    $url = "http://127.0.0.1:$Port"
+    $url = "http://127.0.0.1:$Port/?token=$token"
     Say "running at $url"
     Say "the first index of a project, and the first answer after a boot, take a minute or two:"
     Say "the page header shows 'indexing...' until it is ready.  Logs: $LogDir"
@@ -320,8 +335,10 @@ function Invoke-Status {
     $state = Get-Content $ServerState -Raw | ConvertFrom-Json
     if (-not (Test-Port ([int] $state.port))) { Say "SEI server   : stopped (stale state for $($state.repo))"; return }
     Say "SEI server   : http://127.0.0.1:$($state.port)  ($($state.repo): $($state.root))"
+    if ($state.token) { Say "console      : http://127.0.0.1:$($state.port)/?token=$($state.token)" }
     try {
-        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$($state.port)/status" -TimeoutSec 10
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$($state.port)/status" -TimeoutSec 10 `
+            -Headers (Get-AuthHeaders $state)
         Say "answers      : $($status.llm)"
         Say "search       : $($status.embeddings)  (vector search: $($status.vector_search))"
         if ($status.graph) {
@@ -350,7 +367,7 @@ function Invoke-Index {
     $body = @{ repo = $state.repo } | ConvertTo-Json
     $started = Get-Date
     $reply = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($state.port)/index/sync" `
-        -ContentType "application/json" -Body $body -TimeoutSec 3600
+        -ContentType "application/json" -Body $body -TimeoutSec 3600 -Headers (Get-AuthHeaders $state)
     if (-not $reply.accepted) { Say "refused: $($reply.reason)"; exit 1 }
     Say ("done in {0:N0} s." -f ((Get-Date) - $started).TotalSeconds)
     Invoke-Status

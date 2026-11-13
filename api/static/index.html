@@ -165,6 +165,23 @@
 
 <script>
 "use strict";
+// The server only answers requests that carry this run's token. The browser is
+// opened at /?token=…; keep it for this tab, take it out of the address bar,
+// and add it to every request the page makes.
+const TOKEN = (() => {
+  const fromLink = new URLSearchParams(location.search).get("token");
+  let saved = null;
+  try {
+    if (fromLink) sessionStorage.setItem("sei-token", fromLink);
+    saved = sessionStorage.getItem("sei-token");
+  } catch (e) { /* storage blocked: the link's token still works for this load */ }
+  if (fromLink) history.replaceState(null, "", location.pathname);
+  return fromLink || saved || "";
+})();
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => nativeFetch(url, {
+  ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${TOKEN}` },
+});
 const $ = (id) => document.getElementById(id);
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 

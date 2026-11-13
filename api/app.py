@@ -15,10 +15,11 @@ The pipeline follows §7's diagram: route -> resolve/retrieve -> expand -> pack
 # evaluates `str | None` and `list[Block]` natively, so nothing here needs it.
 
 import json
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Iterator, Sequence
+from typing import Awaitable, Callable, Collection, Iterator, Sequence
 
 import metrics
 from adapters.base import Symbol
@@ -461,6 +462,19 @@ def sse(event: object) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _host_name(host_header: str) -> str:
+    """`localhost:8000` -> `localhost`, `[::1]:8000` -> `::1`, lower-cased."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def _bearer(header: str) -> str | None:
+    scheme, _, value = header.partition(" ")
+    return value.strip() or None if scheme.lower() == "bearer" else None
+
+
 #: The console: one self-contained page, no build step and no CDN, so it works
 #: with the network cable out. Plan §9's cut ladder dropped the Next.js console
 #: for the CLI; this is the smallest thing that puts §6.4's badges and §5.4's
@@ -476,6 +490,8 @@ def create_app(
     watcher=None,
     bootstrap: Callable[[], Awaitable[None]] | None = None,
     status: Callable[[], dict] | None = None,
+    token: str | None = None,
+    allowed_hosts: Collection[str] | None = None,
 ):
     """The FastAPI surface: the console, ask, rename ingress, Sync Project.
 
@@ -493,6 +509,15 @@ def create_app(
     It runs as a task rather than in start-up proper so the server answers —
     and `/status` can say "indexing" — while a first index is still under way.
     `status` supplies what `/status` reports about providers and the graph.
+
+    `token` and `allowed_hosts` are the access check, and `api.cli` always
+    passes both. With a token, every route but `/healthz` needs
+    `Authorization: Bearer <token>`; the console page alone may take it as
+    `?token=` instead, because that is the link the browser is opened at.
+    With `allowed_hosts`, a request whose `Host` header names anything else is
+    refused before the token is looked at — the defence against a web page
+    rebinding its own domain to 127.0.0.1. Left at None (as the tests that
+    exercise the routes themselves do), the app is open.
     """
     import asyncio
     from contextlib import asynccontextmanager
@@ -521,6 +546,19 @@ def create_app(
             await indexer.aclose()
 
     app = FastAPI(title="SEI", lifespan=lifespan)
+    hosts = None if allowed_hosts is None else {h.lower() for h in allowed_hosts}
+
+    @app.middleware("http")
+    async def access_check(request, call_next):
+        if hosts is not None and _host_name(request.headers.get("host", "")) not in hosts:
+            return JSONResponse({"error": "this server answers on localhost only"}, status_code=403)
+        if token is not None and request.url.path != "/healthz":
+            supplied = _bearer(request.headers.get("authorization", ""))
+            if supplied is None and request.method == "GET" and request.url.path == "/":
+                supplied = request.query_params.get("token")
+            if supplied is None or not secrets.compare_digest(supplied.encode(), token.encode()):
+                return JSONResponse({"error": "missing or wrong token"}, status_code=401)
+        return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     def console():

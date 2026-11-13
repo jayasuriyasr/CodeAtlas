@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import logging
 import os
+import secrets
 import sys
 import time
 from dataclasses import dataclass
@@ -66,6 +67,11 @@ from retrieve.pipeline import QueryRetriever
 from retrieve.structural import StructuralResolver
 
 AI_MODES = ("auto", "local", "cloud", "off")
+
+#: The `Host` header values a server bound to this machine answers to.
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+#: Shortest `SEI_API_TOKEN` accepted from the environment.
+MIN_TOKEN_LENGTH = 16
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -556,6 +562,28 @@ def _run(args, runtime: Runtime) -> int:
     return 0
 
 
+def serve_security(host: str, *, env_token: str | None) -> tuple[str, frozenset[str] | None]:
+    """The token and allowed `Host` names for a server bound to `host`.
+
+    A local bind gets a fresh random token for this run (or `SEI_API_TOKEN`,
+    so a script that started the server can call it) and answers only to
+    localhost names. A bind anyone else can reach serves the source code to
+    them, so it is refused unless the user chose a token deliberately — and
+    then the Host check is dropped, because clients will use the machine's
+    own name and the token is what protects it.
+    """
+    if env_token is not None and len(env_token) < MIN_TOKEN_LENGTH:
+        raise SystemExit(f"SEI_API_TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
+    if host in LOCAL_HOSTS:
+        return env_token or secrets.token_urlsafe(32), LOCAL_HOSTS
+    if not env_token:
+        raise SystemExit(
+            f"refusing to serve on {host}: anyone who can reach it could read the "
+            f"source code. Set SEI_API_TOKEN to a long random value first."
+        )
+    return env_token, None
+
+
 def _serve(args, runtime: Runtime) -> int:
     import uvicorn
 
@@ -567,13 +595,18 @@ def _serve(args, runtime: Runtime) -> int:
             indexer=runtime.indexer, repo=args.repo, root=runtime.root,
             extensions=tuple(runtime.indexer.adapters),
         )
+    token, hosts = serve_security(args.host, env_token=os.environ.get("SEI_API_TOKEN"))
     app = create_app(
         runtime.service, runtime.indexer, repos=[args.repo],
         watcher=watcher,
         bootstrap=runtime.bootstrap if watcher is not None else None,
         status=runtime.status,
+        token=token,
+        allowed_hosts=hosts,
     )
+    shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     print(f"serving {args.repo} ({args.root}) on http://{args.host}:{args.port}", file=sys.stderr)
+    print(f"console: http://{shown}:{args.port}/?token={token}", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
