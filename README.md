@@ -76,9 +76,9 @@ published under the *Qwen Research License* — fine for study and evaluation, n
 for commercial use. Swap it with `SEI_LOCAL_LLM` (and `SEI_LOCAL_EMBED` for the
 embedder), then re-measure with `python -m eval.local_gates`.
 
-**Running the tests deletes the index.** Neo4j Community has one database and
-the suite isolates by wiping it. After `pytest`, the next `sei start` rebuilds
-the index by itself (embeddings are cached, so that is quick).
+**The tests have their own Neo4j.** Neo4j Community has one database and the
+suite isolates by wiping it, so it never uses the app's: `sei test` starts a
+second server on port 7688 (installed by `sei setup`) and runs the suite there.
 
 ## Results
 
@@ -160,19 +160,30 @@ once.
 
 ### Run the tests
 
+The suite needs a Neo4j of its own, because it wipes the database it uses:
+
 ```bash
-.venv/Scripts/python -m pytest tests/ -v
+docker compose up -d neo4j-test
 ```
 
+```bash
+SEI_REQUIRE_NEO4J=1 .venv/Scripts/python -m pytest tests/
+```
+
+(`sei test` does both on Windows without Docker.) The tests connect to
+`SEI_TEST_NEO4J_URI`, by default `bolt://localhost:7688` — never the app's
+`SEI_NEO4J_URI`. Before the first wipe they check the database: if it holds
+data and does not carry the suite's marker, the run stops rather than delete
+it (`SEI_TEST_ALLOW_WIPE=1` overrides that). In the other direction, the app
+refuses to index into a database that carries the marker.
+
 The tests are grouped by build step, from the Neo4j ground-truth probes up to
-the end-to-end evaluation, and `pytest tests/` runs all of them.
+the end-to-end evaluation, and `pytest tests/` runs all of them. Set
+`SEI_REQUIRE_NEO4J=1` to make a missing database a failure rather than a skip.
 
-Set `SEI_REQUIRE_NEO4J=1` to make a missing database a failure rather than a
-skip; without it, the graph tests skip when Neo4j is down.
-
-**One suite at a time.** Neo4j Community has a single user database, so the
-per-module fixture isolates by wiping it. Two concurrent runs — or `pytest -n`
-— delete each other's data and fail in ways that look like real defects.
+**One suite at a time.** Two concurrent runs against the same test server — or
+`pytest -n` — delete each other's data and fail in ways that look like real
+defects.
 
 No test calls a real LLM or embedding API: that would send source code to a
 third party. Providers are tested against stub transports — the local ones
@@ -215,3 +226,5 @@ credentials read the environment:
 | `SEI_LOCAL_LLM` | `qwen2.5-coder:3b` |
 | `SEI_LOCAL_EMBED` | `nomic-embed-text` |
 | `SEI_TOOLS_DIR` | unset — `sei` reads `.local/config.json`, written by `sei setup` |
+| `SEI_TEST_NEO4J_URI` | `bolt://localhost:7688` — the test suite's own server |
+| `SEI_TEST_ALLOW_WIPE` | unset — set to `1` to let the suite wipe an unmarked database |

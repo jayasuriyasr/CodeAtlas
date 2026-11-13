@@ -444,6 +444,25 @@ def _print_notes(notes: dict) -> None:
         print(f"# {frame['badge']:<14} {frame['frame']}", file=sys.stderr)
 
 
+#: The index the test suite leaves on its database (tests/db_guard.py).
+TEST_DATABASE_MARKER = "sei_test_database_marker"
+
+
+def refuse_test_database(driver, database: str = NEO4J_DEFAULT_DATABASE) -> None:
+    """Stop if `database` is the test suite's: the next test run would wipe it."""
+    with driver.session(database=database) as session:
+        marked = session.run(
+            "SHOW INDEXES YIELD name WHERE name = $name RETURN count(*) AS n",
+            name=TEST_DATABASE_MARKER,
+        ).single()["n"]
+    if marked:
+        raise SystemExit(
+            f"this Neo4j is the test suite's database (it carries {TEST_DATABASE_MARKER}); "
+            f"the next test run would delete anything indexed here. Point SEI_NEO4J_URI "
+            f"at the app's own server."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
     args = build_parser().parse_args(argv)
@@ -460,6 +479,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:                       # noqa: BLE001 - report, don't mask
         print(f"Neo4j unavailable at {NEO4J_URI}: {exc}", file=sys.stderr)
         print("Start it with: sei start   (or: docker compose up -d)", file=sys.stderr)
+        driver.close()
+        return 1
+    try:
+        refuse_test_database(driver)
+    except SystemExit as stop:
+        print(stop, file=sys.stderr)
         driver.close()
         return 1
 

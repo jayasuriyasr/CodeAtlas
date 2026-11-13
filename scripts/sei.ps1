@@ -63,6 +63,9 @@ function Save-Config([string] $tools) {
 
 $Tools = Get-ToolsDir
 $Neo4jHome = Join-Path $Tools "neo4j\neo4j-community-$Neo4jVersion"
+# A second, disposable server for the test suite, which wipes what it uses.
+$Neo4jTestHome = Join-Path $Tools "neo4j-test\neo4j-community-$Neo4jVersion"
+$TestBoltPort = 7688
 $OllamaDir = Join-Path $Tools "ollama"
 $ModelsDir = Join-Path $Tools "ollama-models"
 $LogDir = Join-Path $Tools "logs"
@@ -201,6 +204,7 @@ server.config.strict_validation.enabled=false
     } else {
         Say "Neo4j is already installed."
     }
+    Install-Neo4jTest
 
     # -- local models --------------------------------------------------------
     if ($NoModels) { Say "skipping local models (-NoModels)."; return }
@@ -223,6 +227,55 @@ server.config.strict_validation.enabled=false
 # --------------------------------------------------------------------------
 # start / stop
 # --------------------------------------------------------------------------
+
+function Install-Neo4jTest {
+    # The same distribution without its data, listening on 7688/7475. The
+    # suite refuses to wipe a database holding someone's data; this one never does.
+    if (Test-Path (Join-Path $Neo4jTestHome "bin\neo4j.bat")) { Say "test Neo4j is already installed."; return }
+    New-Item -ItemType Directory -Force $Neo4jTestHome | Out-Null
+    Get-ChildItem $Neo4jHome | Where-Object { $_.Name -notin @("data", "logs", "run") } |
+        ForEach-Object { Copy-Item -Recurse -Force $_.FullName $Neo4jTestHome }
+    foreach ($dir in @("data", "logs", "run")) { New-Item -ItemType Directory -Force (Join-Path $Neo4jTestHome $dir) | Out-Null }
+    $conf = Join-Path $Neo4jTestHome "conf\neo4j.conf"
+    $text = (Get-Content $conf -Raw) -replace "(?s)\r?\n# --- SEI test server.*$", ""
+    Set-Content -Path $conf -Encoding ascii -Value ($text + @"
+
+# --- SEI test server: a second instance so pytest never touches the app's data ---
+server.bolt.listen_address=:$TestBoltPort
+server.bolt.advertised_address=:$TestBoltPort
+server.http.listen_address=:7475
+server.http.advertised_address=:7475
+server.memory.heap.initial_size=512m
+server.memory.heap.max_size=1G
+server.memory.pagecache.size=256m
+"@)
+    $env:JAVA_HOME = Find-Java
+    & (Join-Path $Neo4jTestHome "bin\neo4j-admin.bat") dbms set-initial-password $Neo4jPassword | Out-Null
+    Say "test Neo4j installed (port $TestBoltPort)."
+}
+
+function Start-Neo4jTest {
+    if (Test-Port $TestBoltPort) { return $true }
+    if (-not (Test-Path (Join-Path $Neo4jTestHome "bin\neo4j.bat"))) {
+        Say "the test Neo4j is not installed. Run 'sei setup' (or: docker compose up -d neo4j-test)."
+        return $false
+    }
+    $env:JAVA_HOME = Find-Java
+    New-Item -ItemType Directory -Force $LogDir | Out-Null
+    Say "starting the test Neo4j..."
+    Start-Process -FilePath (Join-Path $Neo4jTestHome "bin\neo4j.bat") -ArgumentList "console" `
+        -WindowStyle Hidden -RedirectStandardOutput (Join-Path $LogDir "neo4j-test.log") `
+        -RedirectStandardError (Join-Path $LogDir "neo4j-test.err.log") | Out-Null
+    return (Wait-Port $TestBoltPort 120 "The test Neo4j")
+}
+
+function Invoke-Test([string[]] $extra) {
+    if (-not (Start-Neo4jTest)) { exit 1 }
+    $env:SEI_REQUIRE_NEO4J = "1"
+    $env:SEI_TEST_NEO4J_URI = "bolt://localhost:$TestBoltPort"
+    Push-Location $Root
+    try { & $Python -m pytest tests/ @extra; exit $LASTEXITCODE } finally { Pop-Location }
+}
 
 function Start-Neo4j {
     if (Test-Port 7687) { Say "Neo4j is already running."; return $true }
@@ -311,6 +364,7 @@ function Invoke-Stop {
         } finally { Pop-Location }
     }
     Stop-PortOwner 7687 "Neo4j"
+    if (Test-Port $TestBoltPort) { Stop-PortOwner $TestBoltPort "test Neo4j" }
     $ollama = Find-Ollama
     if ($ollama -and (Test-Port 11434)) {
         # Free the GPU; the model server itself is left for other programs.
@@ -383,6 +437,7 @@ switch ($Command.ToLower()) {
         Push-Location $Root; try { Invoke-Cli @($Target) } finally { Pop-Location }
     }
     "index"  { Invoke-Index }
+    "test"   { if ($Target -ne "") { Invoke-Test @($Target) } else { Invoke-Test @() } }
     default  {
         Write-Host @"
 SEI - ask questions about a codebase, on this machine.
@@ -393,6 +448,7 @@ SEI - ask questions about a codebase, on this machine.
   sei ask "question"           ask the running project from the terminal
   sei index                    re-index the running project from scratch
   sei stop                     stop the server and Neo4j, unload the models
+  sei test ["pytest args"]     run the test suite against its own Neo4j (port 7688)
 
 Options:  -ToolsDir <folder>  where large files live (now: $Tools)
           -Port <n>           console port (default 8000)      -NoBrowser   do not open the page

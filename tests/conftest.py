@@ -27,17 +27,16 @@ import pytest
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
-from config import (
-    NEO4J_DEFAULT_DATABASE,
-    NEO4J_PASSWORD,
-    NEO4J_URI,
-    NEO4J_USER,
-)
+from config import NEO4J_DEFAULT_DATABASE
 from graph.bootstrap import apply_schema, drop_schema
+from tests import db_guard
+
+#: The suite's own server. Never the app's: it wipes what it uses.
+TEST_NEO4J_URI, TEST_NEO4J_USER, TEST_NEO4J_PASSWORD = db_guard.connection_settings(os.environ)
 
 _UNREACHABLE = (
-    f"NEO4J UNAVAILABLE at {NEO4J_URI} — these tests did NOT run.\n"
-    f"Start it with:  docker compose up -d   (then: docker compose ps)\n"
+    f"NEO4J UNAVAILABLE at {TEST_NEO4J_URI} — these tests did NOT run.\n"
+    f"Start the test server with:  docker compose up -d neo4j-test   (or: sei test)\n"
     f"A gate covering a skipped test is NOT met. See PROGRESS.md."
 )
 
@@ -55,7 +54,7 @@ _REQUIRE_NEO4J = os.environ.get("SEI_REQUIRE_NEO4J", "").strip() not in ("", "0"
 
 @pytest.fixture(scope="session")
 def neo4j_driver() -> Driver:
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    driver = GraphDatabase.driver(TEST_NEO4J_URI, auth=(TEST_NEO4J_USER, TEST_NEO4J_PASSWORD))
     try:
         driver.verify_connectivity()
     except (ServiceUnavailable, Neo4jError, OSError) as exc:  # pragma: no cover - env
@@ -138,11 +137,22 @@ def throwaway_db(neo4j_driver: Driver, server_info: ServerInfo, request) -> Test
         return
 
     # Community: one user database (§9.1). Wipe it instead, both before and
-    # after, so a module neither inherits nor leaks state.
+    # after, so a module neither inherits nor leaks state — but only once the
+    # session has established that the database is the suite's to wipe.
+    request.getfixturevalue("wipe_permission")
     db = TestDatabase(driver=neo4j_driver, name=NEO4J_DEFAULT_DATABASE, mode="scoped-wipe")
     _wipe(db)
     yield db
     _wipe(db)
+
+
+@pytest.fixture(scope="session")
+def wipe_permission(neo4j_driver: Driver) -> None:
+    """Stop the session before the first wipe of a database that is not ours."""
+    has_data, marked, repos = db_guard.inspect(neo4j_driver, NEO4J_DEFAULT_DATABASE)
+    if not db_guard.may_wipe(has_data, marked, db_guard.allow_wipe(os.environ)):
+        pytest.exit(db_guard.refusal(TEST_NEO4J_URI, repos), returncode=3)
+    db_guard.mark(neo4j_driver, NEO4J_DEFAULT_DATABASE)
 
 
 def _wipe(db: TestDatabase) -> None:
@@ -156,6 +166,7 @@ def _wipe(db: TestDatabase) -> None:
             ).single()
             if summary["c"] == 0:
                 break
+    db_guard.mark(db.driver, db.name)        # the marker outlives every wipe
 
 
 @pytest.fixture(scope="module")
