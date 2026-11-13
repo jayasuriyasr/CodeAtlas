@@ -25,7 +25,7 @@ import subprocess
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Protocol, Sequence
 
 import metrics
@@ -125,6 +125,35 @@ def _run_git(root: Path, *args: str) -> str:
 def _is_git_repo(root: Path) -> bool:
     return bool(_run_git(root, "rev-parse", "--is-inside-work-tree").strip())
 
+
+
+class UnsafePath(ValueError):
+    """A path that is absolute, or that leaves the repository root."""
+
+
+def safe_rel_path(root: Path, rel_path: str) -> str:
+    """`rel_path` as a POSIX path inside `root`, or `UnsafePath`.
+
+    Paths reach the indexer from outside — the rename route takes them from an
+    HTTP body — and `root / rel_path` trusts them: an absolute path replaces
+    the root outright, and `..` walks out of it. So a path must be relative on
+    both POSIX and Windows terms, contain no `..`, and still be inside the root
+    once symlinks are resolved. The file need not exist yet: a rename names its
+    destination before anything is read.
+    """
+    if not rel_path or not rel_path.strip():
+        raise UnsafePath("empty path")
+    posix = rel_path.replace("\\", "/")
+    if posix.startswith("/") or PureWindowsPath(rel_path).drive or PureWindowsPath(rel_path).root:
+        raise UnsafePath(f"{rel_path!r} is absolute; paths must be relative to the repository")
+    parts = [part for part in posix.split("/") if part not in ("", ".")]
+    if not parts or ".." in parts:
+        raise UnsafePath(f"{rel_path!r} points outside the repository")
+    base = Path(root).resolve()
+    target = base.joinpath(*parts).resolve()
+    if target != base and base not in target.parents:
+        raise UnsafePath(f"{rel_path!r} resolves outside the repository")
+    return "/".join(parts)
 
 #: The wall clock, read through one name so a test can step it back.
 _wall_clock_ns = time.time_ns
@@ -296,7 +325,13 @@ class Indexer:
         self._reset_debounce(repo)
 
     def on_rename(self, repo: str, old: str, new: str) -> None:
-        """§4.1 Signal A. Recorded now, parsed at flush — a pure move fires no save."""
+        """§4.1 Signal A. Recorded now, parsed at flush — a pure move fires no save.
+
+        Both paths come from outside — an editor, or the HTTP route — and the
+        new one is read at flush, so both are checked here (`UnsafePath`).
+        """
+        root = self.roots[repo]
+        old, new = safe_rel_path(root, old), safe_rel_path(root, new)
         self._renames[repo].append(Move(old_path=old, new_path=new))
         self._reset_debounce(repo)
 
@@ -333,7 +368,18 @@ class Indexer:
         return adapter.parse(repo, rel_path, content)
 
     def _read(self, repo: str, rel_path: str) -> bytes:
-        return (self.roots[repo] / rel_path).read_bytes()
+        """The bytes of a file inside the repository root, and nowhere else.
+
+        A path that escapes the root — including through a symlink — is
+        reported as unreadable (`PermissionError`), which every caller already
+        handles by skipping the file.
+        """
+        try:
+            safe = safe_rel_path(self.roots[repo], rel_path)
+        except UnsafePath as exc:
+            metrics.incr("index.unsafe_path")
+            raise PermissionError(str(exc)) from exc
+        return (self.roots[repo] / safe).read_bytes()
 
     # -- moves (§4.1) ------------------------------------------------------
 

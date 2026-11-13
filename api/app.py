@@ -498,7 +498,7 @@ def create_app(
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, StreamingResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
     from pydantic import BaseModel
 
     @asynccontextmanager
@@ -580,7 +580,10 @@ def create_app(
             # A flush for a repo with no root would fail reading the new path,
             # in a background task where nobody sees the error.
             return {"accepted": False, "reason": f"unknown repo {body.repo!r}"}
-        indexer.on_rename(body.repo, body.old_path, body.new_path)
+        try:
+            indexer.on_rename(body.repo, body.old_path, body.new_path)
+        except ValueError as exc:                  # UnsafePath: absolute, or outside the root
+            return JSONResponse({"accepted": False, "reason": str(exc)}, status_code=400)
         return {"accepted": True}
 
     @app.post("/index/sync")
