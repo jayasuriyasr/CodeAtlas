@@ -2,28 +2,35 @@
 
 **SEI — Software Engineering Investigation Engine.** Repository-level GraphRAG
 over Python/Django and TypeScript/Next.js codebases: ask a question about a
-repository and get a streamed answer in which every claim cites the code it
-came from — and every citation is checked.
+repository and get a streamed answer whose claims cite the code they came
+from, with each citation checked as described below.
 
 - **Indexes a codebase into a graph.** Tree-sitter parses Python and TypeScript
   into symbols (functions, classes, modules) and edges (calls, imports,
-  definitions, Django URL dispatch, React hooks). They are written to Neo4j with
-  a vector embedding per symbol.
+  definitions, inheritance, Django URL dispatch, React hooks). They are written
+  to Neo4j with a vector embedding per symbol. Calls through `self`, `cls` and
+  `this` are resolved along the class's method resolution order; calls on other
+  objects (`order.ship()`) are not, because that needs type inference.
 - **Routes each question to the retrieval it needs.** "What calls `X`" is
-  answered by traversing the graph; a pasted stack trace is resolved frame by
-  frame to the symbols it names; anything else goes to hybrid fulltext + vector
-  search fused with reciprocal rank fusion, then one hop of graph expansion.
+  answered by traversing the graph one hop; a pasted stack trace is resolved
+  frame by frame to the symbols it names; anything else goes to hybrid fulltext +
+  vector search fused with reciprocal rank fusion, then one hop of graph
+  expansion. A name that matches several symbols is answered with the list of
+  candidates, not with all of them merged.
 - **Packs the evidence into a token budget** — full bodies for the best
   matches, signatures for the rest — and hands it to the model with numbered
   handles (`[C1]`, `[C2]`, …).
-- **Checks the answer as it streams.** Each sentence is classified as a claim
-  or not, every citation must name a block that was actually shown, and
-  relations the answer asserts ("`a` calls `b`") are verified against the
-  graph. A poorly grounded answer gets one bounded retry, and anything still
-  unsupported is marked in the output rather than hidden.
+- **Checks the answer.** Each sentence is classified as a claim or not. A claim
+  must cite a block that was actually shown, and the code names it mentions must
+  appear in the block it cites (a cheap check: it catches citations of unrelated
+  code, not wrong statements about the right code). Relation claims written in a
+  recognised form ("`a` calls `b`", "`X` is called by the `Y` method",
+  "inherits from") are looked up in the graph. A poorly grounded answer gets one
+  bounded retry, and whatever is still unsupported is marked, not hidden.
 - **Keeps the index current.** Saves are debounced and re-indexed
-  incrementally; file moves keep their inbound edges; embeddings are cached so
-  an unchanged symbol is never re-embedded.
+  incrementally; a changed signature re-links the callers in other files; file
+  moves keep their inbound edges; embeddings are cached so an unchanged symbol
+  is never re-embedded.
 
 ## Running it on one machine (Windows)
 
@@ -82,22 +89,70 @@ second server on port 7688 (installed by `sei setup`) and runs the suite there.
 
 ## Results
 
-The 45-question golden set (15 structural, 15 semantic, 15 stack-trace
-questions over a Django and a Next.js fixture), run through the full pipeline
-with the local models:
+Measured on 2026-11-13 with the local models (`qwen2.5-coder:3b`,
+`nomic-embed-text`) on a laptop with a 4 GB GPU. **Read these as numbers about
+two small fixtures written for this project** — a Django app of 18 files and
+73 symbols, and a Next.js app of 4 files and 20 symbols — not about real
+codebases. The golden set is 45 questions: 15 structural, 15 semantic and 15
+stack traces (8 Python, 7 TypeScript). At 15 questions a class, one question
+moves a class score by 6.7 points.
 
 | Metric | Result | Target |
 |---|---|---|
-| Recall@10, measured on the packed context the model actually saw | 0.978 | ≥ 0.80 |
+| Recall@10 on the packed context the model saw, vector arm on (off) | 0.978 (0.933) | ≥ 0.80 |
 | MRR | 0.828 | ≥ 0.55 |
-| Citation coverage (claim sentences that cite a shown block) | 0.919 | ≥ 0.85 |
-| Time to first token, p50 / p95 | 0.86 s / 1.64 s | ≤ 1.2 s / 2.5 s |
+| Structural traversal against the full expected answer: precision / recall | 0.971 / 0.786 | — |
+| Citation coverage (claim sentences citing a shown block), four runs | 0.797 – 0.919 | ≥ 0.85 |
+| Cited claims whose cited block lacks a code name they mention | 7 of 55 | — |
+| Relation precision (relation claims the graph confirms) | 0.750, over 4 claims | ≥ 0.90 |
+| Answers that needed the one retry | 11 – 13 of 45 | — |
+| TS/TSX stack frames resolved to a symbol | 3 of 9 | — |
+| Time to first token, p50 / p95, model already loaded | 0.51 s / 1.03 s | ≤ 1.2 s / 2.5 s |
 | Inbound edges kept across a `git mv` | 1.000 | ≥ 0.95 |
 | Embedding cache hit rate on an unchanged re-index | 1.000 | ≥ 0.90 |
+| T2 claim classifier, precision / recall — on the author's own reference sentences | 0.981 / 0.962 | ≥ 0.90 / 0.85 |
 
-The vector arm with the local embedder lifts Recall@10 from 0.933 (fulltext and
-graph only) to 0.978. `python -m eval.local_gates` re-runs the measurement and
-writes a full report to `eval/GATE_REPORT_local.md`.
+What the table does not say on its own:
+
+- **Recall@10 for structural questions measures entity lookup.** Their `gold`
+  is the symbol the question names. Whether the traversal returned the right
+  callers is the separate *structural traversal* row, scored against
+  `expected_related` in the golden set — the full answer read off the fixture's
+  source and cross-checked with Python's `ast`. Its misses are real: "what
+  imports `common.utils`" returns nothing (import edges point at the imported
+  functions, not the module), a route question falls back to search, and
+  `token.revoke()` on a local variable is never resolved.
+- **Citation coverage fails the gate on the latest run** (0.797). One answer
+  made 8 uncited claims; without it the run is 0.90. The model does not follow
+  the citation instruction reliably, and one answer in four needs the retry.
+- **Relation precision is over 4 claims** in 45 answers. The local model rarely
+  states a relation in a form the checker can read, so this number is too thin
+  to mean much, and before this round it was not measured at all.
+- **The classifier row is not a measurement on model output.** It scores the
+  classifier on reference sentences the author wrote, with the gold symbols
+  passed in as known names.
+- **The hosted models are unmeasured.** `ANTHROPIC_API_KEY` and
+  `VOYAGE_API_KEY` switch the answers and the embeddings to hosted models;
+  none of the numbers above apply to them.
+
+`python -m eval.local_gates` re-runs the local measurement and writes the full
+report, with every answer, to `eval/GATE_REPORT_local.md`.
+
+## Known limitations
+
+- Call resolution is syntactic: `self.x()` and imported names resolve, calls on
+  other objects do not. There is no type inference.
+- Structural answers are one hop: direct callers, direct subclasses.
+- TypeScript stack frames from bundled code (`.next/server/chunks/…`) can only be
+  matched by name; there is no source-map support, so ambiguous names are
+  refused rather than guessed.
+- The packer counts tokens with an approximation that over-counts (measured
+  against the local model's own tokenizer: 0.52–0.94 real tokens per counted
+  one). It errs toward too little context, never a truncated prompt.
+- One Neo4j database holds every indexed repository; queries are scoped by
+  `repo_id`, and the vector search widens its fetch so a small repository is
+  not crowded out by a large one.
+- The default local answer model is research-licensed (see above).
 
 ## Running it by hand
 
