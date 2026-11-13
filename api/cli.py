@@ -29,6 +29,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import metrics
 from adapters.python import PythonAdapter
@@ -36,6 +37,7 @@ from adapters.typescript import TypeScriptAdapter
 from config import (
     AI_MODE,
     AVAILABLE,
+    DEFAULT_NEO4J_PASSWORD,
     EMBEDDING_CACHE_PATH,
     LOCAL_CONTEXT_HEADROOM,
     LOCAL_EMBED_MODEL,
@@ -448,6 +450,21 @@ def _print_notes(notes: dict) -> None:
 TEST_DATABASE_MARKER = "sei_test_database_marker"
 
 
+def check_neo4j_credentials(uri: str, password: str) -> None:
+    """Refuse the repository's development password for a server on another host.
+
+    `sei-dev-password` is fine where only this machine can connect. Anywhere
+    else it is a published password, so a non-local `SEI_NEO4J_URI` needs a
+    `SEI_NEO4J_PASSWORD` of its own.
+    """
+    host = (urlsplit(uri).hostname or "").lower()
+    if password == DEFAULT_NEO4J_PASSWORD and host not in LOCAL_HOSTS:
+        raise SystemExit(
+            f"refusing to connect to {host} with the development password from the "
+            f"repository. Set SEI_NEO4J_PASSWORD to that server's own password."
+        )
+
+
 def refuse_test_database(driver, database: str = NEO4J_DEFAULT_DATABASE) -> None:
     """Stop if `database` is the test suite's: the next test run would wipe it."""
     with driver.session(database=database) as session:
@@ -473,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"--root {args.root} is not a directory", file=sys.stderr)
         return 2
 
+    try:
+        check_neo4j_credentials(NEO4J_URI, NEO4J_PASSWORD)
+    except SystemExit as stop:
+        print(stop, file=sys.stderr)
+        return 2
     driver = _driver()
     try:
         driver.verify_connectivity()

@@ -24,7 +24,10 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 NEO4J_URI: str = os.environ.get("SEI_NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER: str = os.environ.get("SEI_NEO4J_USER", "neo4j")
-NEO4J_PASSWORD: str = os.environ.get("SEI_NEO4J_PASSWORD", "sei-dev-password")
+#: The development password, for a server only this machine can reach. It is
+#: in the repository, so `api.cli` refuses it for any other host.
+DEFAULT_NEO4J_PASSWORD = "sei-dev-password"
+NEO4J_PASSWORD: str = os.environ.get("SEI_NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD)
 
 #: The single user database Community Edition provides (spec §9.1, §12.1).
 #: Tests fall back to scoping inside it when CREATE DATABASE is unavailable.

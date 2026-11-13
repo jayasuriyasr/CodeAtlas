@@ -1,5 +1,8 @@
 # CodeAtlas
 
+*CodeAtlas is the repository; SEI is the engine inside it, and the name its
+command (`sei`), environment variables (`SEI_*`) and package use.*
+
 **SEI — Software Engineering Investigation Engine.** Repository-level GraphRAG
 over Python/Django and TypeScript/Next.js codebases: ask a question about a
 repository and get a streamed answer whose claims cite the code they came

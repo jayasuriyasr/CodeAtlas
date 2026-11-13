@@ -81,6 +81,13 @@ LLMClassifier = Callable[[str], "QueryClass | None"]
 
 @dataclass
 class QueryRouter:
+    #: §5.1's LLM fallback for questions no pattern decides. Off by default,
+    #: and deliberately not wired by `api.cli`: a class without a rule cannot
+    #: drive a traversal (STRUCTURAL with no rule falls back to search), so
+    #: the only answer that changes nothing is SEMANTIC — which is already the
+    #: default. Wiring it would add a model call per ambiguous question for
+    #: no change in the answer. It stays as the hook a rule-returning
+    #: classifier would plug into.
     llm_classify: LLMClassifier | None = None
 
     def route(self, query: str) -> Routed:

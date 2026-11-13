@@ -4,11 +4,15 @@
 #   §9.1  "Neo4j Community Edition supports a single user database."
 #   §12.1 "Community Edition has no clustering and one user database."
 # Community therefore cannot CREATE DATABASE, so the "throwaway database per
-# test module" fixture degrades to a scoped wipe of the single database.
-# See tests/conftest.py and FINDINGS.md F-001.
+# test module" fixture degrades to a scoped wipe of the single database —
+# which is why the tests have a server of their own (neo4j-test, below).
 #
-# To run Enterprise instead (real per-module databases), you must accept
-# Neo4j's licence yourself — see docs/neo4j-enterprise.md. Not done for you.
+# To run Enterprise instead (real per-module databases), switch the image to
+# neo4j:5.26.0-enterprise and set NEO4J_ACCEPT_LICENSE_AGREEMENT=yes — after
+# reading Neo4j's licence, which that variable says you accept. Not done for you.
+#
+# Ports are published on 127.0.0.1 only: the password below is in the
+# repository, so these servers must not be reachable from the network.
 
 services:
   neo4j:
@@ -18,8 +22,8 @@ services:
     image: neo4j:5.26.0-community
     container_name: sei-neo4j
     ports:
-      - "7474:7474"   # HTTP / Browser
-      - "7687:7687"   # Bolt
+      - "127.0.0.1:7474:7474"   # HTTP / Browser
+      - "127.0.0.1:7687:7687"   # Bolt
     environment:
       NEO4J_AUTH: "neo4j/sei-dev-password"
       NEO4J_server_memory_heap_initial__size: "512m"
@@ -45,8 +49,8 @@ services:
     image: neo4j:5.26.0-community
     container_name: sei-neo4j-test
     ports:
-      - "7475:7474"
-      - "7688:7687"
+      - "127.0.0.1:7475:7474"
+      - "127.0.0.1:7688:7687"
     environment:
       NEO4J_AUTH: "neo4j/sei-dev-password"
       NEO4J_server_memory_heap_initial__size: "512m"
