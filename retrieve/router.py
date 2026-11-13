@@ -33,10 +33,16 @@ class QueryClass(str, Enum):
 
 #: Questions the graph answers exactly. Each names a relationship, which is why
 #: a traversal is the answer rather than an input to one.
+#:
+#: Order matters, and callees comes first: "what does X call" also contains
+#: "what … call", and with the callers rule tried first the answer depended on
+#: whether X was short enough to fit its 20-character gap. The callees form is
+#: recognised by its auxiliary — "does"/"do" after the question word — which
+#: "what calls X" never has.
 _STRUCTURAL = (
+    ("callees", re.compile(r"\b(what|who|which)\b(\s+\w+)?\s+(does|do)\b.{0,40}\bcall\b", re.I)),
     ("callers", re.compile(r"\b(what|who|which)\b.{0,20}\bcalls?\b", re.I)),
     ("callers", re.compile(r"\bcallers?\s+of\b", re.I)),
-    ("callees", re.compile(r"\bwhat\s+does\b.{0,40}\bcall\b", re.I)),
     ("usages", re.compile(r"\b(where|what)\b.{0,20}\b(is|are)\b.{0,30}\bused\b", re.I)),
     ("usages", re.compile(r"\b(usages?|references?)\s+(of|to)\b", re.I)),
     ("definition", re.compile(r"\bwhere\s+is\b.{0,40}\b(defined|declared|implemented)\b", re.I)),
