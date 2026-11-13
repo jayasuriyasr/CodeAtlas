@@ -165,7 +165,9 @@ def sei_callers(runner, repo_id: str, function: Function) -> set[str]:
     return {row["qn"] for row in rows}
 
 
-def measure_repo(root: Path, runtime, *, limit: int, name: str = "", commit: str = "") -> RepoResult:
+def measure_repo(
+    root: Path, runtime, *, limit: int, name: str = "", commit: str = ""
+) -> RepoResult:
     """Index `root` with `runtime`, then score its callers against jedi's."""
     import jedi
 
@@ -190,6 +192,10 @@ def measure_repo(root: Path, runtime, *, limit: int, name: str = "", commit: str
 # -- the report -------------------------------------------------------------------------
 
 
+def _row(function: str, callers: list[str]) -> str:
+    return f"- `{function}` ← " + ", ".join(f"`{c}`" for c in callers)
+
+
 def render(results: list[RepoResult]) -> str:
     def fmt(value: float | None) -> str:
         return "—" if value is None else f"{value:.3f}"
@@ -211,9 +217,9 @@ def render(results: list[RepoResult]) -> str:
         extra = [(s.function.qualified_name, sorted(s.found - s.gold)) for s in r.scored
                  if s.found - s.gold]
         lines += ["", f"## {r.name}", "", f"Missed callers ({len(missed)} functions):", ""]
-        lines += [f"- `{fn}` ← {', '.join(f'`{c}`' for c in callers)}" for fn, callers in missed[:25]]
+        lines += [_row(fn, callers) for fn, callers in missed[:25]]
         lines += ["", f"Callers SEI reports that jedi does not ({len(extra)} functions):", ""]
-        lines += [f"- `{fn}` ← {', '.join(f'`{c}`' for c in callers)}" for fn, callers in extra[:25]]
+        lines += [_row(fn, callers) for fn, callers in extra[:25]]
     return "\n".join(lines) + "\n"
 
 
