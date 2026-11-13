@@ -563,13 +563,16 @@ def _this_call(callee, source: bytes, sym: Symbol, by_qname: dict[str, Symbol]) 
 
     `this.store.save()` is not one: its receiver is whatever `store` holds.
     """
+    if callee.type == "super":
+        # `super(...)` in a constructor calls the parent's constructor.
+        return member_call_edge(sym, "constructor", by_qname, via_super=True)
     if callee.type != "member_expression":
         return None
     obj = callee.child_by_field_name("object")
     prop = callee.child_by_field_name("property")
-    if obj is None or prop is None or obj.type != "this":
+    if obj is None or prop is None or obj.type not in ("this", "super"):
         return None
-    return member_call_edge(sym, _text(prop, source), by_qname)
+    return member_call_edge(sym, _text(prop, source), by_qname, via_super=obj.type == "super")
 
 
 def _reference_edge(kind, text, sym, by_qname, imports, module_qname, rel_path) -> Edge:

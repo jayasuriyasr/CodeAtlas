@@ -152,6 +152,9 @@ class Edge:
     #: inherited from one of its bases. The writer resolves it by walking the
     #: class's method resolution order, and refuses when that walk is uncertain.
     through_bases: bool = False
+    #: With `through_bases`: a `super()` call, so the class itself is skipped
+    #: and the lookup starts at the next class in its resolution order.
+    after_owner: bool = False
 
 
 def edge_target_name(edge: Edge, by_qname: dict[str, Symbol]) -> str:
@@ -163,7 +166,9 @@ def edge_target_name(edge: Edge, by_qname: dict[str, Symbol]) -> str:
     return edge.target_hint or ""
 
 
-def member_call_edge(sym: Symbol, method: str, by_qname: dict[str, Symbol]) -> Edge | None:
+def member_call_edge(
+    sym: Symbol, method: str, by_qname: dict[str, Symbol], *, via_super: bool = False
+) -> Edge | None:
     """The edge for `self.method()` / `this.method()` made inside `sym`, or None.
 
     Shared by both adapters; each one decides what counts as a receiver and
@@ -180,6 +185,10 @@ def member_call_edge(sym: Symbol, method: str, by_qname: dict[str, Symbol]) -> E
     if owner is None or owner.kind != "class":
         return None
     member = f"{owner_qname}.{method}"
+    if via_super:
+        # Never the class's own method: that is the point of `super()`.
+        return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                    target_hint=member, through_bases=True, after_owner=True)
     if member in by_qname:
         return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
                     target_uid=by_qname[member].uid)

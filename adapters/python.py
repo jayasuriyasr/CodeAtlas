@@ -646,11 +646,29 @@ def _member_call(
         return None
     obj = callee.child_by_field_name("object")
     attr = callee.child_by_field_name("attribute")
-    if obj is None or attr is None or obj.type != "identifier":
+    if obj is None or attr is None:
         return None
-    if _text(obj, source) not in receivers:
+    if _is_super(obj, source, sym):
+        return member_call_edge(sym, _text(attr, source), by_qname, via_super=True)
+    if obj.type != "identifier" or _text(obj, source) not in receivers:
         return None
     return member_call_edge(sym, _text(attr, source), by_qname)
+
+
+def _is_super(node, source: bytes, sym: Symbol) -> bool:
+    """`super()`, or `super(ThisClass, self)` naming the enclosing class."""
+    if node.type != "call":
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None or _text(fn, source) != "super":
+        return False
+    args = node.child_by_field_name("arguments")
+    positional = [a for a in (args.named_children if args is not None else [])
+                  if a.type != "comment"]
+    if not positional:
+        return True
+    owner = sym.qualified_name.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+    return len(positional) == 2 and _text(positional[0], source) == owner
 
 
 def _call_edge(

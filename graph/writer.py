@@ -567,8 +567,11 @@ class GraphWriter:
         defined = self._exact_symbols(repo_id, lookups, batch_paths, epoch)
 
         out: list[Edge] = []
-        for edge, (cls, method) in zip(edges, wanted, strict=False):
-            target, outcome = _walk_mro(orders[cls], classes, method, defined)
+        for edge, (cls, method) in zip(edges, wanted, strict=True):
+            order = orders[cls]
+            if order is not None and edge.after_owner:
+                order = order[1:]                 # super(): start after the class
+            target, outcome = _walk_mro(order, classes, method, defined)
             if outcome == "ambiguous":
                 report.edges_ambiguous += 1
                 metrics.incr("writer.member_ambiguous")
