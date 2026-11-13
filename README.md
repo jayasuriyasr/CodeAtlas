@@ -11,8 +11,8 @@ from, with each citation checked as described below.
 - **Indexes a codebase into a graph.** Tree-sitter parses Python and TypeScript
   into symbols (functions, classes, modules) and edges (calls, imports,
   definitions, inheritance, Django URL dispatch, React hooks). They are written
-  to Neo4j with a vector embedding per symbol. Calls through `self`, `cls` and
-  `this` are resolved along the class's method resolution order; calls on other
+  to Neo4j with a vector embedding per symbol. Calls through `self`, `cls`,
+  `this` and `super()` are resolved along the class's method resolution order; calls on other
   objects (`order.ship()`) are not, because that needs type inference.
 - **Routes each question to the retrieval it needs.** "What calls `X`" is
   answered by traversing the graph one hop; a pasted stack trace is resolved
@@ -126,10 +126,10 @@ finds at least one caller for:
 | Repository (pinned commit) | Functions scored | Precision | Recall |
 |---|---|---|---|
 | django-taggit 6.1.0 (`4e5f7de6`) | 45 | 1.000 | 0.862 |
-| django-filter 26.2 (`daddf7b6`) | 60 | 1.000 | 0.282 |
+| django-filter 26.2 (`daddf7b6`) | 60 | 1.000 | 0.369 |
 
-SEI reported no caller jedi disagrees with; what it misses is mostly calls
-through `super()` and method calls on local variables, which need type
+SEI reported no caller jedi disagrees with; what it misses is mostly method
+calls on local variables (`form.clean()`, common in tests), which need type
 inference. TypeScript has no language-server gold yet.
 
 What the table does not say on its own:
