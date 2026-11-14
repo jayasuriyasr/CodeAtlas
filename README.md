@@ -120,17 +120,26 @@ moves a class score by 6.7 points.
 
 **On code not written for SEI.** `python -m eval.benchmark` indexes pinned
 releases of two open-source Django projects and scores "what calls X" against
-the callers jedi (a Python language server) finds, for every function jedi
-finds at least one caller for:
+the callers jedi (a Python language server) finds. Every function in each
+repository is examined (`--sample N --seed S` scores a seeded random sample
+instead, and the report says so). Precision is given two ways: over the
+functions jedi finds a caller for, and over every function — where a caller SEI
+reports for a function jedi finds none for counts as wrong:
 
-| Repository (pinned commit) | Functions scored | Precision | Recall |
-|---|---|---|---|
-| django-taggit 6.1.0 (`4e5f7de6`) | 45 | 1.000 | 0.862 |
-| django-filter 26.2 (`daddf7b6`) | 60 | 1.000 | 0.369 |
+| Repository (pinned commit) | Functions examined | With jedi callers | Precision, where jedi has callers | Precision, all | Recall |
+|---|---|---|---|---|---|
+| django-taggit 6.1.0 (`4e5f7de6`) | 273 (all) | 45 | 1.000 | 1.000 | 0.915 |
+| django-filter 26.2 (`daddf7b6`) | 745 (all) | 95 | 0.996 | 0.988 | 0.748 |
 
-SEI reported no caller jedi disagrees with; what it misses is mostly method
-calls on local variables (`form.clean()`, common in tests), which need type
-inference. TypeScript has no language-server gold yet.
+An earlier version of this table said "every function" but scored the first 60
+in sorted file order: django-filter recall 0.369 there, against 0.471 for the
+same code over every function. Calls on objects whose type the code states
+(`till = Till()`, a typed parameter, a class attribute) raised that to 0.748.
+Of the 84 callers still missed in django-filter, 49 are method calls on locals
+bound more than once or by a loop or `with` — SEI types a local only when one
+assignment fixes it — and 14 are call chains or indexing. Where the two
+disagree is listed in `eval/BENCHMARK_REPORT.md`. TypeScript has no
+language-server gold yet.
 
 What the table does not say on its own:
 

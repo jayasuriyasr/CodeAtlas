@@ -4,15 +4,22 @@ The golden set's two fixtures were written for this project. This measures
 "what calls X" on code nobody wrote for SEI, with the answer taken from jedi —
 a Python language server's reference search — rather than written by hand:
 
-    python -m eval.benchmark                    # every repo in benchmark_repos.json
-    python -m eval.benchmark --repo django-taggit --limit 40
+    python -m eval.benchmark                    # every function of every repo
+    python -m eval.benchmark --repo django-taggit --sample 100 --seed 7
 
 For each repository, pinned to a release commit: clone it once (into the tools
 folder, `SEI_BENCH_DIR`, or `.sei/benchmarks`), index it with SEI, enumerate its
-functions and methods with Python's `ast`, and for each one ask jedi for every
-place that *calls* it. Functions jedi finds at least one caller for are scored:
-the callers SEI's graph has (CALLS edges into the function) against jedi's,
-by qualified name, micro-averaged. The report goes to `eval/BENCHMARK_REPORT.md`.
+functions and methods with Python's `ast`, and for each one — every one, or a
+seeded random sample when `--sample` is given — ask jedi for every place that
+*calls* it, and the graph for the callers SEI has (CALLS edges into it). Scored
+by qualified name, micro-averaged, two ways:
+
+- precision over the functions jedi finds a caller for (the original measure);
+- precision over every function examined, where a caller SEI reports for a
+  function jedi finds *no* caller for counts as wrong.
+
+Recall is over jedi's callers either way. The report goes to
+`eval/BENCHMARK_REPORT.md` and says whether it covers every function or a sample.
 
 What this does not cover: TypeScript. A TS gold set needs tsserver, which
 means the npm `typescript` package and a project configuration per repository;
@@ -27,6 +34,7 @@ import argparse
 import ast
 import asyncio
 import json
+import random
 import subprocess
 import sys
 import tempfile
@@ -64,7 +72,14 @@ class RepoResult:
     commit: str
     files: int = 0
     functions: int = 0
+    #: How many functions were looked at: all of them, or the sample.
+    examined: int = 0
+    sample: int | None = None
+    seed: int | None = None
+    #: Functions jedi finds a caller for.
     scored: list[Scored] = field(default_factory=list)
+    #: Functions jedi finds no caller for, but SEI does.
+    unconfirmed: list[Scored] = field(default_factory=list)
 
     @property
     def precision(self) -> float | None:
@@ -75,6 +90,19 @@ class RepoResult:
     def recall(self) -> float | None:
         gold = sum(len(s.gold) for s in self.scored)
         return sum(len(s.hits) for s in self.scored) / gold if gold else None
+
+    @property
+    def precision_all(self) -> float | None:
+        """Precision with SEI's unconfirmed callers counted as wrong."""
+        found = sum(len(s.found) for s in (*self.scored, *self.unconfirmed))
+        return sum(len(s.hits) for s in self.scored) / found if found else None
+
+    @property
+    def scope(self) -> str:
+        if self.sample is None:
+            return f"every function ({self.functions})"
+        return (f"a random sample of {self.examined} of {self.functions} functions, "
+                f"seed {self.seed}")
 
 
 # -- the functions, by Python's own parser -------------------------------------------
@@ -165,27 +193,49 @@ def sei_callers(runner, repo_id: str, function: Function) -> set[str]:
     return {row["qn"] for row in rows}
 
 
+def choose_functions(
+    functions: list[Function], sample: int | None, seed: int
+) -> list[Function]:
+    """All of them, or a seeded random sample kept in file order.
+
+    Not the first N: sorted file order puts whole packages (often `tests/`)
+    first, so a prefix measures one corner of the repository.
+    """
+    if sample is None or sample >= len(functions):
+        return list(functions)
+    chosen = set(random.Random(seed).sample(range(len(functions)), sample))
+    return [f for i, f in enumerate(functions) if i in chosen]
+
+
 def measure_repo(
-    root: Path, runtime, *, limit: int, name: str = "", commit: str = ""
+    root: Path, runtime, *, sample: int | None = None, seed: int = 0,
+    limit: int | None = None, name: str = "", commit: str = "",
 ) -> RepoResult:
-    """Index `root` with `runtime`, then score its callers against jedi's."""
+    """Index `root` with `runtime`, then score its callers against jedi's.
+
+    `limit` is the older name for `sample`.
+    """
     import jedi
 
     from index.indexer import list_indexable
 
+    sample = sample if sample is not None else limit
     asyncio.run(runtime.indexer.sync_project(runtime.repo))
     indexed = set(list_indexable(root, (".py",)))
     result = RepoResult(name=name or root.name, commit=commit, files=len(indexed))
     project = jedi.Project(str(root))
     functions = [f for rel in sorted(indexed) for f in functions_in(root, rel)]
-    result.functions = len(functions)
-    for function in functions:
-        if len(result.scored) >= limit:
-            break
+    chosen = choose_functions(functions, sample, seed)
+    result.functions, result.examined = len(functions), len(chosen)
+    if len(chosen) < len(functions):
+        result.sample, result.seed = len(chosen), seed
+    for function in chosen:
         gold = jedi_callers(project, root, function, indexed)
+        found = sei_callers(runtime.service.graph_runner, runtime.repo, function)
         if gold:
-            result.scored.append(Scored(function, gold, sei_callers(
-                runtime.service.graph_runner, runtime.repo, function)))
+            result.scored.append(Scored(function, gold, found))
+        elif found:
+            result.unconfirmed.append(Scored(function, gold, found))
     return result
 
 
@@ -205,12 +255,18 @@ def render(results: list[RepoResult]) -> str:
         "",
         "# Callers: SEI against jedi",
         "",
-        "| repository | commit | files | functions | scored | precision | recall |",
-        "|---|---|---|---|---|---|---|",
+        "Precision, where jedi has callers: over the functions jedi finds a caller",
+        "for. Precision, all: over every function examined — a caller SEI reports",
+        "for a function jedi finds none for counts as wrong.",
+        "",
+        "| repository | commit | files | examined | with jedi callers | precision, "
+        "where jedi has callers | precision, all | recall |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        lines.append(f"| {r.name} | {r.commit[:10]} | {r.files} | {r.functions} | "
-                     f"{len(r.scored)} | {fmt(r.precision)} | {fmt(r.recall)} |")
+        lines.append(f"| {r.name} | {r.commit[:10]} | {r.files} | {r.scope} | "
+                     f"{len(r.scored)} | {fmt(r.precision)} | {fmt(r.precision_all)} | "
+                     f"{fmt(r.recall)} |")
     for r in results:
         missed = [(s.function.qualified_name, sorted(s.gold - s.found)) for s in r.scored
                   if s.gold - s.found]
@@ -220,6 +276,9 @@ def render(results: list[RepoResult]) -> str:
         lines += [_row(fn, callers) for fn, callers in missed[:25]]
         lines += ["", f"Callers SEI reports that jedi does not ({len(extra)} functions):", ""]
         lines += [_row(fn, callers) for fn, callers in extra[:25]]
+        lines += ["", f"Callers SEI reports for functions jedi finds no caller for "
+                      f"({len(r.unconfirmed)} functions):", ""]
+        lines += [_row(s.function.qualified_name, sorted(s.found)) for s in r.unconfirmed[:25]]
     return "\n".join(lines) + "\n"
 
 
@@ -255,7 +314,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="python -m eval.benchmark")
     parser.add_argument("--repo", help="only this repository (by name)")
-    parser.add_argument("--limit", type=int, default=60, help="functions scored per repository")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="a seeded random sample of this many functions (default: all)")
+    parser.add_argument("--seed", type=int, default=0, help="the sample's seed")
     args = parser.parse_args(argv)
     try:
         import jedi  # noqa: F401
@@ -275,14 +336,15 @@ def main(argv: list[str] | None = None) -> int:
                 runtime = build_runtime(repo_id, root, ai="off", driver=driver,
                                         cache_path=Path(scratch) / "c.sqlite")
                 try:
-                    result = measure_repo(root, runtime, limit=args.limit,
+                    result = measure_repo(root, runtime, sample=args.sample, seed=args.seed,
                                           name=spec["name"], commit=spec["commit"])
                 finally:
                     runtime.indexer.cache.close()
                     with driver.session(database=config.NEO4J_DEFAULT_DATABASE) as session:
                         session.run("MATCH (n {repo_id: $r}) DETACH DELETE n", r=repo_id)
-            print(f"# {result.name}: {len(result.scored)} functions scored, precision "
-                  f"{result.precision}, recall {result.recall}", file=sys.stderr)
+            print(f"# {result.name}: {result.scope}; {len(result.scored)} with jedi callers; "
+                  f"precision {result.precision}, all {result.precision_all}, "
+                  f"recall {result.recall}", file=sys.stderr)
             results.append(result)
     finally:
         driver.close()
