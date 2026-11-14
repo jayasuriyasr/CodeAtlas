@@ -186,9 +186,17 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
 
 ## Known limitations
 
-- Call resolution is syntactic: `self.x()` and imported names resolve, calls on
-  other objects do not. There is no type inference.
-- Structural answers are one hop: direct callers, direct subclasses.
+- Call resolution has no type inference. `self.x()`, `super().x()`, imported
+  names, and calls on an object whose type the code states (`till = Till()`
+  assigned once, a typed parameter, a class attribute, `self.a` set once in
+  `__init__`) resolve, through the class hierarchy. A local bound twice, a call
+  on a call's result, and a method called on a class named directly
+  (`FilterSet.filter_for_field(…)`) do not. TypeScript resolves `this.x()` and
+  imports only.
+- "What calls X" is one hop, plus the callers of the method X overrides
+  (marked "through dispatch"). "What eventually calls X" and "what is affected
+  if I change X" walk up to `MULTIHOP_MAX_DEPTH` (4) levels and
+  `MULTIHOP_MAX_RESULTS` (50) symbols, and say when they stop at the cap.
 - TypeScript stack frames from bundled code (`.next/server/chunks/…`) resolve
   through the build's source map when the `.map` is on disk beside the chunk
   (Next.js writes server maps only when configured to). Without one they are
