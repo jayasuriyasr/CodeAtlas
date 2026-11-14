@@ -66,19 +66,19 @@ _CODE_SHAPED = re.compile(
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: Words that appear in structural questions and never name a symbol.
-_STOP = frozenset(
-    """
-    a an the what who which where how is are was were does do did of to in on
-    for by from with and or not it its this that these those there here call
-    calls called caller callers calling callee callees use uses used usage usages
-    reference references referenced define defined declared declare implemented
-    implement implementation implementations implementors subclass subclasses
-    import imports imported route routes view views handler handlers handle
-    handles function functions method methods class classes module modules
-    component components hook hooks endpoint endpoints code repo repository
-    me show list find all any every
-    """.split()
-)
+_STOP = frozenset({
+    "a", "an", "the", "what", "who", "which", "where", "how", "is", "are", "was", "were",
+    "does", "do", "did", "of", "to", "in", "on", "for", "by", "from", "with", "and", "or",
+    "not", "it", "its", "this", "that", "these", "those", "there", "here", "call", "calls",
+    "called", "caller", "callers", "calling", "callee", "callees", "use", "uses", "used",
+    "usage", "usages", "reference", "references", "referenced", "define", "defined", "declared",
+    "declare", "implemented", "implement", "implementation", "implementations", "implementors",
+    "subclass", "subclasses", "import", "imports", "imported", "route", "routes", "view",
+    "views", "handler", "handlers", "handle", "handles", "function", "functions", "method",
+    "methods", "class", "classes", "module", "modules", "component", "components", "hook",
+    "hooks", "endpoint", "endpoints", "code", "repo", "repository", "me", "show", "list",
+    "find", "all", "any", "every"
+})
 
 
 def entity_terms(question: str) -> list[str]:
