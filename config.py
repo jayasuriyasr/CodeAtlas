@@ -137,6 +137,7 @@ EDGE_WEIGHTS: dict[str, float] = {
     "USES_SERIALIZER": 0.7,
     "HAS_FIELD": 0.6,
     "INHERITS": 0.7,                   # † a guess like the rest; untuned
+    "OVERRIDES": 0.6,                  # † a guess like the rest; untuned
     "IMPORTS": 0.4,
 }
 EDGE_WEIGHT_DEFAULT: float = 0.5       # † §11.1 coalesce fallback
@@ -158,6 +159,7 @@ EDGE_TYPE_ALLOWLIST: tuple[str, ...] = (
     "HAS_FIELD",
     "USES_SERIALIZER",
     "INHERITS",
+    "OVERRIDES",
 )
 
 #: How many levels of base classes the writer walks to resolve an inherited

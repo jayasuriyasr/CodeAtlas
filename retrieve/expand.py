@@ -39,7 +39,8 @@ UNWIND $seed_uids AS seed_uid
 MATCH (seed:Symbol {uid: seed_uid, repo_id: $repo_id})
 CALL (seed) {
     MATCH (seed)-[r:CALLS|IMPORTS|DEFINES|DISPATCHES_TO
-                  |INVOKES_HOOK|RENDERS|HAS_FIELD|USES_SERIALIZER|INHERITS]-(n:Symbol)
+                  |INVOKES_HOOK|RENDERS|HAS_FIELD|USES_SERIALIZER|INHERITS
+                  |OVERRIDES]-(n:Symbol)
     WHERE n.uid <> seed.uid
       AND n.repo_id = $repo_id
       AND coalesce(n.degree, 0) <= $hub_cutoff

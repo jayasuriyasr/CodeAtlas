@@ -318,7 +318,8 @@ function renderRoute(turn) {
   const related = (n.structural && n.structural.related) || [];
   if (related.length) {
     turn.framesEl.innerHTML = related.map((r) =>
-      `<li><span class="badge ok tier">from the graph</span><span class="mono">${esc(r.qualified_name)}`
+      `<li><span class="badge ${r.via ? "warn" : "ok"} tier">${r.via ? "through dispatch" : "from the graph"}</span>`
+      + `<span class="mono" title="${r.via ? esc("calls " + r.via + ", which this method overrides") : ""}">${esc(r.qualified_name)}`
       + ` <span style="color:var(--muted)">${esc(r.rel_path)}:${r.start_line}</span></span></li>`).join("");
   }
   if (n.frames && n.frames.length) {

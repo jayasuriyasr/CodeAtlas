@@ -345,6 +345,7 @@ class GraphWriter:
 
         # -- 3b. Edges, one statement per relationship type -----------------
         resolved = self._resolve_edge_targets(repo_id, edges, report, paths, epoch)
+        resolved += self._override_edges(repo_id, symbols, paths, epoch)
         report.edges_written = self._upsert_edges(resolved, epoch)
         boundary("3b")
 
@@ -592,6 +593,39 @@ class GraphWriter:
                 metrics.incr("writer.member_resolved")
                 out.append(Edge(source_uid=edge.source_uid, kind=edge.kind,
                                 origin_path=edge.origin_path, target_uid=target))
+        return out
+
+    def _override_edges(
+        self, repo_id: str, symbols: list[Symbol], batch_paths: list[str], epoch: int
+    ) -> list[Edge]:
+        """OVERRIDES from each method in the batch to the method it overrides.
+
+        The overridden method is the nearest definition of the same name along
+        the class's resolution order, after the class itself — what `super()`
+        would reach. A library base reached first makes it unknown, so no edge.
+        Computed when the subclass's file is written; a base gaining a method
+        later is picked up when the subclass's file is next written.
+        """
+        classes_here = {s.qualified_name for s in symbols if s.kind == "class"}
+        methods = [s for s in symbols if s.kind == "function"
+                   and s.qualified_name.rsplit(".", 1)[0] in classes_here]
+        if not methods:
+            return []
+        classes = self._class_bases(repo_id, {m.qualified_name.rsplit(".", 1)[0] for m in methods},
+                                    batch_paths, epoch)
+        memo: dict[str, list[str] | None] = {}
+        orders = {cls: _c3(cls, classes, memo) for cls in classes}
+        lookups = {f"{owner}.{m.name}" for m in methods
+                   for owner in (orders.get(m.qualified_name.rsplit(".", 1)[0]) or [])[1:]
+                   if classes.get(owner) is not None}
+        defined = self._exact_symbols(repo_id, lookups, batch_paths, epoch)
+        out = []
+        for method in methods:
+            order = orders.get(method.qualified_name.rsplit(".", 1)[0])
+            target, outcome = _walk_mro(order[1:] if order else None, classes, method.name, defined)
+            if target is not None and outcome == "resolved":
+                out.append(Edge(source_uid=method.uid, kind="OVERRIDES",
+                                origin_path=method.rel_path, target_uid=target))
         return out
 
     def _through_attributes(

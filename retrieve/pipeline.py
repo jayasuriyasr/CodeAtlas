@@ -144,7 +144,8 @@ class QueryRetriever:
         entity = set(answer.entity_uids)
         notes["structural"]["related"] = [
             {"qualified_name": b.symbol.qualified_name, "rel_path": b.symbol.rel_path,
-             "start_line": b.symbol.start_line}
+             "start_line": b.symbol.start_line,
+             **({"via": answer.via[b.uid]} if b.uid in answer.via else {})}
             for b in [*seeds, *stubs] if b.uid not in entity
         ]
         return seeds, stubs

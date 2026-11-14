@@ -440,7 +440,8 @@ def _print_notes(notes: dict) -> None:
             line += f" — {structural['fallback']}; answered semantically"
         print(line, file=sys.stderr)
         for item in structural.get("related", []):
-            print(f"#   {item['rel_path']}:{item['start_line']}  {item['qualified_name']}",
+            via = f"  (through dispatch: calls {item['via']})" if item.get("via") else ""
+            print(f"#   {item['rel_path']}:{item['start_line']}  {item['qualified_name']}{via}",
                   file=sys.stderr)
     for frame in notes.get("frames", []):
         print(f"# {frame['badge']:<14} {frame['frame']}", file=sys.stderr)

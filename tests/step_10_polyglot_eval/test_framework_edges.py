@@ -63,13 +63,14 @@ def hint_names(parsed, kind: str) -> set[str]:
 def test_allowlist_covers_every_type_3_5_names():
     """§3.5 names eight relationships. All eight must be writable — plus
     INHERITS, added so `self.method()` can resolve to a base class and
-    "subclasses of X" has an edge to traverse. The set is still fixed: a
-    ninth type is exactly as safe as eight, because the parser cannot add one.
+    "subclasses of X" has an edge to traverse, and OVERRIDES, so "what calls
+    X" can include callers reached through dispatch. The set is still fixed:
+    a longer list is exactly as safe, because the parser cannot add a type.
     """
     assert set(EDGE_TYPE_ALLOWLIST) == {
         "CALLS", "IMPORTS", "DEFINES", "DISPATCHES_TO",
         "INVOKES_HOOK", "RENDERS", "HAS_FIELD", "USES_SERIALIZER",
-        "INHERITS",
+        "INHERITS", "OVERRIDES",
     }
 
 

@@ -31,7 +31,8 @@ from config import RERANK_TOP_K, STRUCTURAL_RESULT_LIMIT
 #: Router rule -> (direction from the entity, relationship types). "in" means
 #: edges pointing *at* the entity (its callers, importers, users).
 TRAVERSALS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "callers": ("in", ("CALLS", "INVOKES_HOOK")),
+    # Callers, and callers of any method the entity overrides (dispatch).
+    "callers": ("in_with_dispatch", ("CALLS", "INVOKES_HOOK")),
     "callees": ("out", ("CALLS", "INVOKES_HOOK")),
     "usages": (
         "in",
@@ -115,6 +116,27 @@ ORDER BY s.qualified_name
 """
 
 _TRAVERSE = {
+    # Direct callers (via = ""), plus callers of the methods the entity
+    # overrides, up to three levels up (via = the overridden method). One
+    # round trip; a symbol that is both is reported as a direct caller.
+    "in_with_dispatch": """
+        MATCH (t:Symbol {repo_id: $repo_id}) WHERE t.uid IN $uids
+        CALL (t) {
+            MATCH (n:Symbol {repo_id: $repo_id})-[r]->(t)
+            WHERE type(r) IN $types
+            RETURN n, "" AS via
+            UNION
+            MATCH (t)-[:OVERRIDES*1..3]->(base:Symbol {repo_id: $repo_id})
+            MATCH (n:Symbol {repo_id: $repo_id})-[r]->(base)
+            WHERE type(r) IN $types
+            RETURN n, base.qualified_name AS via
+        }
+        WITH n, collect(via) AS vias
+        WHERE NOT n.uid IN $uids
+        RETURN n.uid AS uid, n.rel_path AS rel_path, n.start_line AS start_line,
+               CASE WHEN "" IN vias THEN "" ELSE vias[0] END AS via
+        ORDER BY rel_path, start_line, uid
+    """,
     "in": """
         MATCH (t:Symbol {repo_id: $repo_id}) WHERE t.uid IN $uids
         MATCH (n:Symbol {repo_id: $repo_id})-[r]->(t)
@@ -168,6 +190,9 @@ class StructuralAnswer:
     #: The qualified names an ambiguous entity could mean, for the reader to
     #: choose from. Empty unless the name was refused as ambiguous.
     candidates: list[str] = field(default_factory=list)
+    #: Related symbols reached through dispatch: uid -> the overridden
+    #: method they call, which the entity overrides.
+    via: dict[str, str] = field(default_factory=dict)
 
     def note(self) -> dict:
         note = {
@@ -263,6 +288,10 @@ class StructuralResolver:
         for row in related:
             if row["uid"] not in seen:
                 seen.append(row["uid"])
+                if row.get("via"):
+                    # Calls the method the entity overrides: reaches the entity
+                    # whenever the receiver is an instance of the subclass.
+                    answer.via[row["uid"]] = row["via"]
         answer.total_related = len(seen)
         answer.related_uids = seen[: self.result_limit]
         metrics.incr("structural.answered")
