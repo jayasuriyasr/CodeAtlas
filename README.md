@@ -137,8 +137,16 @@ same code over every function. Calls on objects whose type the code states
 (`till = Till()`, a typed parameter, a class attribute) raised that to 0.748.
 Of the 84 callers still missed in django-filter, 49 are method calls on locals
 bound more than once or by a loop or `with` — SEI types a local only when one
-assignment fixes it — and 14 are call chains or indexing. Where the two
-disagree is listed in `eval/BENCHMARK_REPORT.md`. TypeScript has no
+assignment fixes it — and 14 are call chains or indexing. Every disagreement
+is listed in `eval/BENCHMARK_REPORT.md`, which the run writes.
+
+jedi is the gold here, so it was checked too. [20 disagreements read by
+hand](eval/benchmark_hand_check.md): all three callers only SEI reports are
+real calls jedi does not attribute (in a lambda, in a nested `def`, through
+`super()`), so jedi was wrong in 3 of 20 and "precision, all" understates SEI.
+In the 17 sampled misses jedi was right. The largest cause of misses is a
+method called on a class named directly (`FilterSet.filter_for_field(…)`, an
+inherited classmethod): 26 of the 92, not resolved yet. TypeScript has no
 language-server gold yet.
 
 What the table does not say on its own:
