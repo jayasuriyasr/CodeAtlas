@@ -641,6 +641,25 @@ def serve_security(host: str, *, env_token: str | None) -> tuple[str, frozenset[
     return env_token, None
 
 
+def network_bind_warning(host: str) -> str | None:
+    """What to say when the server is reachable from other machines.
+
+    SEI serves plain HTTP and has no TLS of its own, so on a network bind the
+    bearer token — and every answer, which quotes the source — crosses the
+    network readable by anyone on the path. Refusing would break a trusted
+    LAN or a container; staying quiet would let it pass unnoticed.
+    """
+    if host in LOCAL_HOSTS:
+        return None
+    return (
+        f"warning: serving plain HTTP on {host}. Any machine that can reach this port "
+        "(docker-compose.yml publishes it on 127.0.0.1 only) sees the token and the "
+        "source code in every answer unencrypted. To reach it from elsewhere, bind to "
+        "127.0.0.1 and use an SSH tunnel or a TLS proxy (README: Serving beyond this "
+        "machine)."
+    )
+
+
 def _serve(args, runtime: Runtime) -> int:
     import uvicorn
 
@@ -653,6 +672,9 @@ def _serve(args, runtime: Runtime) -> int:
             extensions=tuple(runtime.indexer.adapters),
         )
     token, hosts = serve_security(args.host, env_token=os.environ.get("SEI_API_TOKEN"))
+    warning = network_bind_warning(args.host)
+    if warning:
+        print(warning, file=sys.stderr)
     app = create_app(
         runtime.service, runtime.indexer, repos=[args.repo],
         watcher=watcher,

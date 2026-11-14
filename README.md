@@ -206,6 +206,28 @@ Or run the server in Docker as well: `SEI_PROJECT=<folder> SEI_API_TOKEN=<long
 random> SEI_NEO4J_PASSWORD=<password> docker compose --profile app up -d`, then
 open `http://127.0.0.1:8000/?token=<token>` (details in `docker-compose.yml`).
 
+### Serving beyond this machine
+
+SEI speaks plain HTTP and has no TLS of its own. Bound to `127.0.0.1` (the
+default) that is fine: nothing leaves the machine. Bound to a network address
+(`--host 0.0.0.0`, which needs `SEI_API_TOKEN`), the token in every request —
+and the source code in every answer — crosses the network readable by anyone
+on the path, and the server prints a warning saying so. To use it from another
+machine, keep it on `127.0.0.1` and either:
+
+- **tunnel over SSH** (nothing to configure): `ssh -L 8000:127.0.0.1:8000
+  <server>`, then open `http://127.0.0.1:8000/?token=<token>` locally; or
+- **put a TLS proxy in front** on the same machine (Caddy, nginx). The proxy
+  must send `Host: 127.0.0.1:8000` upstream — the server refuses any other host
+  name on a local bind (the DNS-rebinding check) — and must not buffer
+  responses, because answers stream. With Caddy: `reverse_proxy 127.0.0.1:8000
+  { header_up Host 127.0.0.1:8000; flush_interval -1 }`. This route is
+  described, not tested here: only the Host check it relies on is.
+
+The console's `?token=` link is taken out of the address bar once the page has
+read it, but it can still reach a proxy's access log — prefer the
+`Authorization: Bearer` header for scripts.
+
 ## Running it by hand
 
 Requires Python 3.11+ and Neo4j 5.26 Community.
