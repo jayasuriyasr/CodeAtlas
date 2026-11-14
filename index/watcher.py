@@ -96,24 +96,39 @@ class TreeWatcher:
         """`rel_path -> (mtime, size)` for every file with an indexed suffix.
 
         Prunes the directories that are never source (`.git`, `node_modules`,
-        virtualenvs) so an idle poll stays a few milliseconds. Whether a file
+        virtualenvs), which are never listed. Whether a file
         is *indexable* — `.gitignore` and all — is `list_indexable`'s answer,
         asked only when this cheap pass saw something change.
+
+        One `scandir` pass. On Windows the directory listing already carries
+        each file's mtime and size, so `DirEntry.stat()` costs nothing; a
+        separate `os.stat` per file — what `os.walk` plus `os.stat` did — was
+        two thirds of a poll on a 7,363-file repository (2.8 s of 1.0 s
+        listing plus 1.8 s of stats), with the poll interval at 1 s.
         """
         root = str(self.root)
+        prefix = len(os.path.join(root, ""))
         out: dict[str, Stat] = {}
-        for folder, dirs, files in os.walk(root):
-            dirs[:] = [d for d in dirs if d not in _DEFAULT_IGNORES]
-            for name in files:
-                if not name.endswith(self.extensions):
-                    continue
-                full = os.path.join(folder, name)
-                try:
-                    info = os.stat(full)
-                except OSError:
-                    continue                    # deleted between listing and stat
-                rel = os.path.relpath(full, root).replace(os.sep, "/")
-                out[rel] = (info.st_mtime_ns, info.st_size)
+        pending = [root]
+        while pending:
+            try:
+                listing = os.scandir(pending.pop())
+            except OSError:
+                continue                        # removed or unreadable mid-walk
+            with listing:
+                for entry in listing:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in _DEFAULT_IGNORES:
+                                pending.append(entry.path)
+                            continue
+                        if not entry.name.endswith(self.extensions):
+                            continue
+                        info = entry.stat()
+                    except OSError:
+                        continue                # deleted between listing and stat
+                    rel = entry.path[prefix:].replace(os.sep, "/")
+                    out[rel] = (info.st_mtime_ns, info.st_size)
         return out
 
     def _indexable(self, stats: dict[str, Stat]) -> set[str]:

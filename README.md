@@ -163,6 +163,33 @@ The gold was checked too ([read by hand](eval/benchmark_hand_check.md)):
 TypeScript recall is measured on one small application (28 functions with
 callers); taxonomy's only miss is one caller.
 
+**On a large repository.** `python -m eval.scale` runs the server's own
+indexer, watcher and retriever on cal.com v6.2.0 (`1c193cca`): 7,363
+TypeScript files, 22,486 symbols. One laptop: 12 threads, 15 GB RAM, an RTX 3050
+with 4 GB; local embeddings (`nomic-embed-text`).
+
+| Measurement | Before | After the fix |
+|---|---|---|
+| First index, empty graph and cache | 1,363 s (22.7 min) | — |
+| Warm restart, nothing changed | 8.9 s | 8.4 s |
+| Watcher's idle poll (interval 1 s) | 1,639 ms | 325 ms |
+| Save to searchable, p50 / max of 5 | 5.27 s / 6.15 s | 3.74 s / 4.94 s |
+| "What calls X", p50 / p95 of 15 | 10 ms / 152 ms | 7 ms / 158 ms |
+| Semantic retrieval, p50 / p95 of 15 | 106 ms / 117 ms | 106 ms / 125 ms |
+| Memory: SEI process peak / Neo4j | 261 MB (first index), 86 MB (serving) / 1.3 GB | same |
+
+Where the time goes, measured on a 286-file slice: the first index is 74% embedding,
+15% graph writes and 2% parsing. Embedding is bound by the GPU at about 21 chunks
+a second; 64 texts per request instead of 16 saved 7%, so batching is not the
+lever. Not fetching vectors before the graph is searchable would be, and is not
+built. The bottleneck code could fix is the watcher. On every 1 s tick it re-read
+the whole tree, and 1.6 s per pass kept a core about 60% busy while idle and
+delayed every save. The pass now takes each file's size and mtime from the directory
+listing (`os.scandir`) instead of a second `os.stat` per file. The first index
+ran beside a single-threaded benchmark; every other row ran alone. The save
+latency left is the 1 s poll plus the 2 s debounce (`DEBOUNCE_SECONDS` †) by
+design, plus the flush. Search results are retrieval only: no answer model.
+
 What the table does not say on its own:
 
 - **Recall@10 for structural questions measures entity lookup.** Their `gold`
