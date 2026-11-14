@@ -1,5 +1,5 @@
 {
-  "note": "Open-source repositories the caller benchmark runs on, pinned to a release tag and the exact commit it resolves to. `python -m eval.benchmark` clones each once (into the tools folder, never the repository) and refuses to measure a checkout whose HEAD is not the pinned commit.",
+  "note": "Open-source repositories the caller benchmark runs on, each pinned to an exact commit (and the release tag it resolves to, where the project tags releases). `python -m eval.benchmark` clones each once (into the tools folder, never the repository) and refuses to measure a checkout whose HEAD is not the pinned commit.",
   "repos": [
     {
       "name": "django-taggit",
@@ -14,6 +14,19 @@
       "tag": "26.2",
       "commit": "daddf7b65535a4f7c670793ff4a2df2f17e2e4ae",
       "language": "python"
+    },
+    {
+      "name": "healthchecks",
+      "url": "https://github.com/healthchecks/healthchecks.git",
+      "tag": "v5.0.3",
+      "commit": "51a503531d845fc11d5ef270d576c59c300e3620",
+      "language": "python"
+    },
+    {
+      "name": "taxonomy",
+      "url": "https://github.com/shadcn-ui/taxonomy.git",
+      "commit": "298a8857c7128a0d121e7f699dfd729f23b3966d",
+      "language": "typescript"
     }
   ]
 }

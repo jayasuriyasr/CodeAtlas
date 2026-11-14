@@ -21,11 +21,13 @@ by qualified name, micro-averaged, two ways:
 Recall is over jedi's callers either way. The report goes to
 `eval/BENCHMARK_REPORT.md` and says whether it covers every function or a sample.
 
-What this does not cover: TypeScript. A TS gold set needs tsserver, which
-means the npm `typescript` package and a project configuration per repository;
-that is not built. jedi is a dev-only dependency (requirements-dev.txt): it
-infers more than SEI does — `obj.method()` with a known `obj` type is a call to
-that method — which is exactly the gap this is meant to measure.
+The gold is jedi for Python and, for a repository marked `"language":
+"typescript"`, the TypeScript language service — tsserver's engine — through
+`eval/ts_gold.cjs`. Both are dev-only: jedi from requirements-dev.txt, and the
+npm `typescript` package, pinned to TS_GOLD_VERSION and installed on first use
+into the tools folder (`SEI_TS_GOLD_DIR`, or `<tools>/ts-gold`), never the
+repository. Both infer more than SEI does — `obj.method()` with a known `obj`
+type is a call to that method — which is exactly the gap this measures.
 """
 
 from __future__ import annotations
@@ -45,6 +47,10 @@ import config
 
 REPOS_FILE = config.REPO_ROOT / "eval" / "benchmark_repos.json"
 REPORT_PATH = config.REPO_ROOT / "eval" / "BENCHMARK_REPORT.md"
+TS_GOLD_SCRIPT = config.REPO_ROOT / "eval" / "ts_gold.cjs"
+#: The `typescript` package the TS gold runs on, exact so the gold is repeatable.
+TS_GOLD_VERSION = "5.6.3"
+TS_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts")
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,7 @@ class Scored:
 class RepoResult:
     name: str
     commit: str
+    gold: str = "jedi"
     files: int = 0
     functions: int = 0
     #: How many functions were looked at: all of them, or the sample.
@@ -175,6 +182,51 @@ def jedi_callers(project, root: Path, function: Function, indexed: set[str]) -> 
     return callers
 
 
+def typescript_dir(*, install: bool = True) -> Path | None:
+    """The folder holding the pinned `typescript` package, installed on first use."""
+    import os
+    import shutil
+
+    base = Path(os.environ["SEI_TS_GOLD_DIR"]) if os.environ.get("SEI_TS_GOLD_DIR") else (
+        _bench_dir().parent / "ts-gold")
+    package = base / "node_modules" / "typescript"
+    manifest = package / "package.json"
+    if manifest.exists():
+        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        if version != TS_GOLD_VERSION:
+            raise SystemExit(f"{package} is typescript {version}, not the pinned {TS_GOLD_VERSION}")
+        return package
+    if not install:
+        return None
+    npm = shutil.which("npm")
+    if npm is None:
+        raise SystemExit("the TypeScript gold needs Node.js and npm")
+    base.mkdir(parents=True, exist_ok=True)
+    subprocess.run([npm, "install", "--prefix", str(base), "--no-audit", "--no-fund",
+                    "--save-exact", f"typescript@{TS_GOLD_VERSION}"], check=True)
+    return package
+
+
+def ts_callers(root: Path, indexed: list[str]) -> dict[tuple[str, str], tuple[Function, set[str]]]:
+    """Every TypeScript function and its callers, per the TypeScript language service.
+
+    Keyed by (file, qualified name): an overloaded function's signatures and
+    its implementation share a name, as they do in SEI, and their callers merge.
+    """
+    package = typescript_dir()
+    run = subprocess.run(["node", str(TS_GOLD_SCRIPT), str(root), str(package)],
+                         input=json.dumps(sorted(indexed)), capture_output=True, text=True,
+                         encoding="utf-8", check=True)
+    out: dict[tuple[str, str], tuple[Function, set[str]]] = {}
+    for row in json.loads(run.stdout):
+        key = (row["rel_path"], row["qualified_name"])
+        if key not in out:
+            out[key] = (Function(row["rel_path"], row["qualified_name"], row["line"],
+                                 row["column"]), set())
+        out[key][1].update(row["callers"])
+    return out
+
+
 # -- SEI's answer -----------------------------------------------------------------------
 
 
@@ -209,28 +261,40 @@ def choose_functions(
 
 def measure_repo(
     root: Path, runtime, *, sample: int | None = None, seed: int = 0,
-    limit: int | None = None, name: str = "", commit: str = "",
+    limit: int | None = None, name: str = "", commit: str = "", language: str = "python",
 ) -> RepoResult:
-    """Index `root` with `runtime`, then score its callers against jedi's.
+    """Index `root` with `runtime`, then score its callers against the gold's.
 
     `limit` is the older name for `sample`.
     """
-    import jedi
-
     from index.indexer import list_indexable
 
     sample = sample if sample is not None else limit
     asyncio.run(runtime.indexer.sync_project(runtime.repo))
-    indexed = set(list_indexable(root, (".py",)))
-    result = RepoResult(name=name or root.name, commit=commit, files=len(indexed))
-    project = jedi.Project(str(root))
-    functions = [f for rel in sorted(indexed) for f in functions_in(root, rel)]
+    if language == "typescript":
+        indexed = set(list_indexable(root, TS_EXTENSIONS))
+        table = ts_callers(root, sorted(indexed))
+        functions = [function for function, _callers in table.values()]
+
+        def gold_of(function: Function) -> set[str]:
+            return table[(function.rel_path, function.qualified_name)][1]
+    else:
+        import jedi
+
+        indexed = set(list_indexable(root, (".py",)))
+        project = jedi.Project(str(root))
+        functions = [f for rel in sorted(indexed) for f in functions_in(root, rel)]
+
+        def gold_of(function: Function) -> set[str]:
+            return jedi_callers(project, root, function, indexed)
+    result = RepoResult(name=name or root.name, commit=commit, files=len(indexed),
+                        gold="tsserver" if language == "typescript" else "jedi")
     chosen = choose_functions(functions, sample, seed)
     result.functions, result.examined = len(functions), len(chosen)
     if len(chosen) < len(functions):
         result.sample, result.seed = len(chosen), seed
     for function in chosen:
-        gold = jedi_callers(project, root, function, indexed)
+        gold = gold_of(function)
         found = sei_callers(runtime.service.graph_runner, runtime.repo, function)
         if gold:
             result.scored.append(Scored(function, gold, found))
@@ -253,18 +317,19 @@ def render(results: list[RepoResult]) -> str:
     lines = [
         "<!-- Written by `python -m eval.benchmark`. -->",
         "",
-        "# Callers: SEI against jedi",
+        "# Callers: SEI against a language server",
         "",
-        "Precision, where jedi has callers: over the functions jedi finds a caller",
-        "for. Precision, all: over every function examined — a caller SEI reports",
-        "for a function jedi finds none for counts as wrong.",
+        "Gold: jedi for Python; the TypeScript language service (tsserver) for TypeScript.",
+        "Precision, where the gold has callers: over the functions the gold finds a",
+        "caller for. Precision, all: over every function examined — a caller SEI",
+        "reports for a function the gold finds none for counts as wrong.",
         "",
-        "| repository | commit | files | examined | with jedi callers | precision, "
-        "where jedi has callers | precision, all | recall |",
-        "|---|---|---|---|---|---|---|---|",
+        "| repository | gold | commit | files | examined | with gold callers | precision, "
+        "where the gold has callers | precision, all | recall |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        lines.append(f"| {r.name} | {r.commit[:10]} | {r.files} | {r.scope} | "
+        lines.append(f"| {r.name} | {r.gold} | {r.commit[:10]} | {r.files} | {r.scope} | "
                      f"{len(r.scored)} | {fmt(r.precision)} | {fmt(r.precision_all)} | "
                      f"{fmt(r.recall)} |")
     for r in results:
@@ -274,9 +339,9 @@ def render(results: list[RepoResult]) -> str:
                  if s.found - s.gold]
         lines += ["", f"## {r.name}", "", f"Missed callers ({len(missed)} functions):", ""]
         lines += [_row(fn, callers) for fn, callers in missed[:25]]
-        lines += ["", f"Callers SEI reports that jedi does not ({len(extra)} functions):", ""]
+        lines += ["", f"Callers SEI reports that {r.gold} does not ({len(extra)} functions):", ""]
         lines += [_row(fn, callers) for fn, callers in extra[:25]]
-        lines += ["", f"Callers SEI reports for functions jedi finds no caller for "
+        lines += ["", f"Callers SEI reports for functions {r.gold} finds no caller for "
                       f"({len(r.unconfirmed)} functions):", ""]
         lines += [_row(s.function.qualified_name, sorted(s.found)) for s in r.unconfirmed[:25]]
     return "\n".join(lines) + "\n"
@@ -298,10 +363,17 @@ def _bench_dir() -> Path:
 def checkout(spec: dict, base: Path) -> Path:
     """The pinned checkout, cloned on first use; refuses a HEAD that moved."""
     target = base / spec["name"]
-    if not target.exists():
+    if not target.exists() and spec.get("tag"):
         base.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", spec["tag"],
                         spec["url"], str(target)], check=True)
+    elif not target.exists():                  # no release tag: fetch the commit itself
+        base.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "--quiet", str(target)], check=True)
+        subprocess.run(["git", "-C", str(target), "fetch", "--quiet", "--depth", "1",
+                        spec["url"], spec["commit"]], check=True)
+        subprocess.run(["git", "-C", str(target), "-c", "advice.detachedHead=false",
+                        "checkout", "--quiet", "FETCH_HEAD"], check=True)
     head = subprocess.run(["git", "-C", str(target), "rev-parse", "HEAD"], check=True,
                           capture_output=True, text=True).stdout.strip()
     if head != spec["commit"]:
@@ -337,12 +409,14 @@ def main(argv: list[str] | None = None) -> int:
                                         cache_path=Path(scratch) / "c.sqlite")
                 try:
                     result = measure_repo(root, runtime, sample=args.sample, seed=args.seed,
-                                          name=spec["name"], commit=spec["commit"])
+                                          name=spec["name"], commit=spec["commit"],
+                                          language=spec.get("language", "python"))
                 finally:
                     runtime.indexer.cache.close()
                     with driver.session(database=config.NEO4J_DEFAULT_DATABASE) as session:
                         session.run("MATCH (n {repo_id: $r}) DETACH DELETE n", r=repo_id)
-            print(f"# {result.name}: {result.scope}; {len(result.scored)} with jedi callers; "
+            print(f"# {result.name}: {result.scope}; {len(result.scored)} with "
+                  f"{result.gold} callers; "
                   f"precision {result.precision}, all {result.precision_all}, "
                   f"recall {result.recall}", file=sys.stderr)
             results.append(result)

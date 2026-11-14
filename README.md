@@ -119,17 +119,22 @@ moves a class score by 6.7 points.
 | T2 claim classifier, precision / recall — on the author's own reference sentences | 0.981 / 0.962 | ≥ 0.90 / 0.85 |
 
 **On code not written for SEI.** `python -m eval.benchmark` indexes pinned
-releases of two open-source Django projects and scores "what calls X" against
-the callers jedi (a Python language server) finds. Every function in each
-repository is examined (`--sample N --seed S` scores a seeded random sample
-instead, and the report says so). Precision is given two ways: over the
-functions jedi finds a caller for, and over every function — where a caller SEI
-reports for a function jedi finds none for counts as wrong:
+open-source repositories — two Django libraries, a Django application and a
+Next.js application — and scores "what calls X" against a language server's
+callers: jedi for Python, and for TypeScript the TypeScript language service
+(tsserver's engine, `typescript` 5.6.3, a dev-only npm tool installed outside
+the repository). Every function in each repository is examined
+(`--sample N --seed S` scores a seeded random sample instead, and the report
+says so). Precision is given two ways: over the functions the gold finds a
+caller for, and over every function — where a caller SEI reports for a function
+the gold finds none for counts as wrong:
 
-| Repository (pinned commit) | Functions examined | With jedi callers | Precision, where jedi has callers | Precision, all | Recall |
-|---|---|---|---|---|---|
-| django-taggit 6.1.0 (`4e5f7de6`) | 273 (all) | 45 | 1.000 | 1.000 | 0.915 |
-| django-filter 26.2 (`daddf7b6`) | 745 (all) | 95 | 0.996 | 0.988 | 0.748 |
+| Repository (pinned commit) | Gold | Functions examined | With gold callers | Precision, where the gold has callers | Precision, all | Recall |
+|---|---|---|---|---|---|---|
+| django-taggit 6.1.0 (`4e5f7de6`) | jedi | 273 (all) | 45 | 1.000 | 1.000 | 0.915 |
+| django-filter 26.2 (`daddf7b6`) | jedi | 745 (all) | 95 | 0.996 | 0.988 | 0.748 |
+| healthchecks v5.0.3 (`51a50353`), a Django application | jedi | 2,760 (all) | 319 | 0.887 | 0.854 | 0.807 |
+| taxonomy (`298a8857`), a Next.js App Router application | tsserver | 130 (all) | 28 | 1.000 | 1.000 | 0.990 |
 
 An earlier version of this table said "every function" but scored the first 60
 in sorted file order: django-filter recall 0.369 there, against 0.471 for the
@@ -140,14 +145,23 @@ bound more than once or by a loop or `with` — SEI types a local only when one
 assignment fixes it — and 14 are call chains or indexing. Every disagreement
 is listed in `eval/BENCHMARK_REPORT.md`, which the run writes.
 
-jedi is the gold here, so it was checked too. [20 disagreements read by
-hand](eval/benchmark_hand_check.md): all three callers only SEI reports are
-real calls jedi does not attribute (in a lambda, in a nested `def`, through
-`super()`), so jedi was wrong in 3 of 20 and "precision, all" understates SEI.
-In the 17 sampled misses jedi was right. The largest cause of misses is a
-method called on a class named directly (`FilterSet.filter_for_field(…)`, an
-inherited classmethod): 26 of the 92, not resolved yet. TypeScript has no
-language-server gold yet.
+The gold was checked too ([read by hand](eval/benchmark_hand_check.md)):
+
+- **django-taggit and django-filter, 20 disagreements:** all three callers only
+  SEI reports are real calls jedi does not attribute (in a lambda, in a nested
+  `def`, through `super()`), so jedi was wrong in 3 of 20. In the 17 sampled
+  misses jedi was right. The largest cause of misses is a method called on a
+  class named directly (`FilterSet.filter_for_field(…)`, an inherited
+  classmethod): 26 of the 92, not resolved yet.
+- **healthchecks' lower precision is jedi's, not SEI's.** All 201 callers SEI
+  reports there and jedi does not have a call by that name in the caller's body
+  — 140 of them `super().setUp()` in tests, the rest inherited `self.post()`,
+  calls from decorator `wrapper` functions, and module functions called as
+  `curl.post(…)` — and a seeded sample of 10 read by hand were all correct.
+  "Precision" here measures where jedi stops, so read 0.887 as a floor.
+
+TypeScript recall is measured on one small application (28 functions with
+callers); taxonomy's only miss is one caller.
 
 What the table does not say on its own:
 

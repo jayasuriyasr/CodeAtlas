@@ -43,3 +43,23 @@ stand.
 **The largest single cause of misses** is #4's pattern, a method called on a
 class named directly, usually a classmethod the class inherits. It accounts
 for 8 of the 17 sampled misses, and 26 of all 92. SEI does not resolve it yet.
+
+## healthchecks v5.0.3 (`51a50353`), added later the same day
+
+Precision there is 0.887 (0.854 counting unconfirmed callers), so the 201
+callers SEI reports and jedi does not were all checked mechanically, and 10 by
+hand (`random.Random(0).sample`):
+
+- **All 201 have a call by that name in the caller's body** (the `def` line
+  itself excluded). 140 are `super().setUp()` in test classes that subclass
+  `hc.test.BaseTestCase` directly; the rest are inherited `self.post(…)` in
+  transports that extend `HttpTransport`, calls from decorator `wrapper`
+  functions, module functions called as `curl.post(…)` or `emails.sudo_code(…)`,
+  and `channel.assign_all_checks()` after `channel = Channel(…)`.
+- **The 10 read by hand were all correct**: each `setUp` class's direct base is
+  `BaseTestCase`, `WhatsApp` extends `HttpTransport`, `emails` is the imported
+  `hc.lib.emails`, and `channel` is bound once to a `Channel`.
+
+A call by that name is necessary evidence, not proof of the target, which is
+why the sample was read. On this repository "precision" measures where jedi
+stops attributing callers, and is a floor for SEI's.

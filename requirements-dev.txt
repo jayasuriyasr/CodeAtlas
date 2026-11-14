@@ -2,3 +2,6 @@
 ruff==0.8.4
 # Language-server gold for the open-source benchmark (eval/benchmark.py).
 jedi==0.19.2
+# Not pip: the TypeScript gold (eval/ts_gold.cjs) runs on Node.js with the npm
+# `typescript` package, pinned in eval/benchmark.py (TS_GOLD_VERSION) and
+# installed on first use into the tools folder, never this repository.
