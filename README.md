@@ -95,7 +95,7 @@ second server on port 7688 (installed by `sei setup`) and runs the suite there.
 
 ## Results
 
-Measured on 2026-11-13 with the local models (`qwen2.5-coder:3b`,
+Measured on 2026-11-14 with the local models (`qwen2.5-coder:3b`,
 `nomic-embed-text`) on a laptop with a 4 GB GPU. **Read these as numbers about
 two small fixtures written for this project** — a Django app of 18 files and
 73 symbols, and a Next.js app of 4 files and 20 symbols — not about real
@@ -108,12 +108,12 @@ moves a class score by 6.7 points.
 | Recall@10 on the packed context the model saw, vector arm on (off) | 0.978 (0.933) | ≥ 0.80 |
 | MRR | 0.828 | ≥ 0.55 |
 | Structural traversal against the full expected answer: precision / recall | 0.974 / 0.881 | — |
-| Citation coverage (claim sentences citing a shown block), four runs | 0.797 – 0.919 | ≥ 0.85 |
-| Cited claims whose cited block lacks a code name they mention | 7 of 55 | — |
-| Relation precision (relation claims the graph confirms) | 0.750, over 4 claims | ≥ 0.90 |
+| Citation coverage (claim sentences citing a shown block), five runs | 0.797 – 0.919 (latest 0.862) | ≥ 0.85 |
+| Cited claims whose cited block lacks a code name they mention | 7 of 56 | — |
+| Relation precision (relation claims the graph confirms) | 1.000 over 3 claims (earlier: 0.750 over 4) | ≥ 0.90 |
 | Answers that needed the one retry | 11 – 13 of 45 | — |
 | TS/TSX stack frames resolved to a symbol (golden set: no build output, so no source maps) | 3 of 9 | — |
-| Time to first token, p50 / p95, model already loaded | 0.51 s / 1.03 s | ≤ 1.2 s / 2.5 s |
+| Time to first token, p50 / p95, model already loaded | 1.15 s / 2.00 s (earlier: 0.51 s / 1.03 s) | ≤ 1.2 s / 2.5 s |
 | Inbound edges kept across a `git mv` | 1.000 | ≥ 0.95 |
 | Embedding cache hit rate on an unchanged re-index | 1.000 | ≥ 0.90 |
 | T2 claim classifier, precision / recall — on the author's own reference sentences | 0.981 / 0.962 | ≥ 0.90 / 0.85 |
@@ -199,12 +199,35 @@ What the table does not say on its own:
   source and cross-checked with Python's `ast`. Its misses are real: a route
   question falls back to search, a `Meta.model` reference is not an edge, and
   `token.revoke()` on a local variable is never resolved.
-- **Citation coverage fails the gate on the latest run** (0.797). One answer
-  made 8 uncited claims; without it the run is 0.90. The model does not follow
-  the citation instruction reliably, and one answer in four needs the retry.
-- **Relation precision is over 4 claims** in 45 answers. The local model rarely
-  states a relation in a form the checker can read, so this number is too thin
-  to mean much, and before this round it was not measured at all.
+- **Citation coverage moves between runs of the same model** (0.797 – 0.919
+  at temperature 0), so it passes or fails the gate by run. The model is the
+  lever, not the wording. Four runs on 2026-11-14, two models by two answer
+  formats (the current one, and a tighter one asking for one fact per sentence
+  with its own handle and relations written as "`a` calls `b`"):
+
+  | Model, format | Coverage | Relation claims | Relation precision | Retried / still below | TTFT p50 / p95 |
+  |---|---|---|---|---|---|
+  | 3B, current | 0.862 | 3 | 1.000 | 11 / 3 | 1.15 s / 2.00 s |
+  | 3B, tighter | 0.800 | 23 | 0.435 | 19 / 11 | 0.45 s / 0.79 s |
+  | 7B, current | 1.000 | 5 | 0.800 | 5 / 1 | 0.92 s / 4.00 s |
+  | 7B, tighter | 1.000 | 13 | 0.846 | 4 / 1 | 3.74 s / 8.17 s |
+
+  `qwen2.5-coder:7b` cited every claim sentence in both formats; on this 4 GB
+  GPU it spills to the CPU and misses the latency gate (p95 4.0 – 8.2 s). The
+  tighter format multiplied checkable relation claims, but on the 3B it left 11
+  answers below the bar instead of 3, so it was not adopted. Neither reached 50
+  relation claims on 45 questions. Set `SEI_LOCAL_LLM=qwen2.5-coder:7b` where a
+  bigger GPU makes its latency acceptable. It is also Apache-2.0 licensed,
+  while the 3B's licence is research-only.
+- **Relation precision understates the model, and its "contradicted" flag
+  fires on true claims.** The 23 relation claims of the 3B/tighter run were
+  checked by hand against the fixture: 15 are true, and 8 are wrong — four read
+  an audit-event string (`"login"`) as the caller, and three name a class where
+  its method calls. The graph confirmed 10. Of the rest of the true ones, two
+  name a library function (`secrets.token_hex`), which the graph does not hold,
+  and two (`token.revoke()` on a loop variable and on a `.first()` result) are
+  calls SEI does not resolve. Those two counted as *contradicted*, and a
+  contradiction triggers the retry, so the retry can fire on a correct answer.
 - **The classifier row is not a measurement on model output.** It scores the
   classifier on reference sentences the author wrote, with the gold symbols
   passed in as known names.
