@@ -60,6 +60,9 @@ class WriteReport:
     #: step 5's DETACH DELETE takes its incoming edges with it. The indexer
     #: re-reads these files so their edges resolve to the new node.
     relink_paths: list[str] = field(default_factory=list)
+    #: Unresolved call names per path, recorded on its `:File` node so a later
+    #: write that creates one of those names can re-link the caller (A3).
+    waiting: dict[str, set[str]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +358,11 @@ class GraphWriter:
         # them back until the callers' own files were written.
         report.relink_paths = self._outside_callers_of_orphans(repo_id, paths, epoch)
         report.orphans_deleted = self._delete_orphans(repo_id, paths, epoch)
+        # Files elsewhere that were waiting for a name this batch created.
+        self._record_waiting(repo_id, paths, report.waiting)
+        report.relink_paths = sorted(
+            set(report.relink_paths) | set(self._files_waiting_for_new_names(repo_id, paths, epoch))
+        )
         boundary("5")
 
         # -- 6a / 6b. Degrees -----------------------------------------------
@@ -515,6 +523,7 @@ class GraphWriter:
                 break
             if target is None:
                 report.edges_unresolved += 1
+                report.waiting.setdefault(edge.origin_path, set()).add(full)
             elif target is not _REFUSED:
                 out.append(
                     Edge(
@@ -748,6 +757,56 @@ class GraphWriter:
             epoch=epoch,
         )
         return [row["path"] for row in rows if row["path"]]
+
+    def _record_waiting(self, repo_id: str, paths: list[str], waiting: dict[str, set[str]]) -> None:
+        """Replace each batch file's list of call names that resolved to nothing.
+
+        Kept on the `:File` node because that is the unit that gets re-written:
+        when the name appears, the whole file is re-parsed and its edges
+        resolved again. Replaced on every write, so a call that was removed
+        stops waiting.
+        """
+        rows = [{"path": path, "hints": sorted(waiting.get(path, ()))} for path in paths]
+        for chunk in _chunked(rows, WRITE_CHUNK_SIZE):
+            self._run(
+                """
+                UNWIND $rows AS row
+                MATCH (f:File {repo_id: $repo_id, rel_path: row.path})
+                SET f.waiting = row.hints
+                """,
+                rows=chunk,
+                repo_id=repo_id,
+            )
+
+    def _files_waiting_for_new_names(self, repo_id: str, paths: list[str], epoch: int) -> list[str]:
+        """Files outside the batch waiting for a name this batch just created.
+
+        A waiting hint matches a new symbol exactly, or extends it by
+        attribute access (`pkg.helpers.helper.cache` waits on `helper`) — the
+        same prefixes edge resolution tries. A module only matches exactly:
+        resolution never trims a call onto a module (F-015), so re-writing a
+        file for that would change nothing.
+        """
+        if not paths:
+            return []
+        rows = self._run(
+            """
+            MATCH (s:Symbol)
+            WHERE s.repo_id = $repo_id AND s.origin_path IN $batch_paths
+              AND s.epoch <= $epoch AND s.created_epoch = $epoch
+            WITH collect({qn: s.qualified_name, module: s.kind = 'module'}) AS created
+            WHERE size(created) > 0
+            MATCH (f:File {repo_id: $repo_id})
+            WHERE NOT f.rel_path IN $batch_paths AND size(coalesce(f.waiting, [])) > 0
+              AND any(c IN created WHERE any(w IN f.waiting
+                    WHERE w = c.qn OR (NOT c.module AND w STARTS WITH c.qn + '.')))
+            RETURN DISTINCT f.rel_path AS path ORDER BY path
+            """,
+            repo_id=repo_id,
+            batch_paths=paths,
+            epoch=epoch,
+        )
+        return [row["path"] for row in rows]
 
     def _delete_orphans(self, repo_id: str, paths: list[str], epoch: int) -> int:
         """§11.2 step 5, plus the `:File` rows the same paths no longer back."""
