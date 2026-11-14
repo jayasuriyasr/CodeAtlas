@@ -22,6 +22,7 @@ from adapters.base import (
     symbol_uid,
 )
 from adapters.grammars import python_parser, walk
+from adapters.receivers import attribute_types, local_types
 
 #: Definition nodes that become symbols. `lambda` is deliberately absent:
 #: §3.2 says truly anonymous functions are not symbols and appear only inside
@@ -562,7 +563,21 @@ class PythonAdapter:
         # a temporary is freed, making it look correct in a two-line test and
         # silently match nothing here. `node.id` is the underlying node pointer.
         owner_by_node = {node.id: sym for sym, node in collected}
+
+        def resolve(text: str) -> str:
+            return _resolved_name(text, by_qname, table, module_qname, package)
+
+        # Receiver types, where the source states them (adapters/receivers.py).
+        attrs_by_class: dict[str, dict[str, str]] = {}
         for sym, node in collected[1:]:
+            if node.type == "class_definition":
+                attrs_by_class[sym.qualified_name] = attribute_types(node, source, resolve)
+                sym.attributes = [f"{name}={kind}" for name, kind
+                                  in attrs_by_class[sym.qualified_name].items()]
+
+        for sym, node in collected[1:]:
+            locals_ = local_types(node, source, resolve) \
+                if node.type == "function_definition" else {}
             for call in walk(node):
                 if call.type != "call":
                     continue
@@ -575,6 +590,12 @@ class PythonAdapter:
                 if member is not None:
                     edges.append(member)
                     continue
+                typed, keep_plain = _typed_receiver_call(
+                    callee, source, sym, by_qname, locals_, attrs_by_class, resolve)
+                if typed is not None:
+                    edges.append(typed)
+                    if not keep_plain:
+                        continue
                 edges.append(
                     _call_edge(
                         callee, source, sym, by_qname, table, module_qname,
@@ -631,6 +652,71 @@ def _base_nodes(class_node) -> list:
     if bases is None:
         return []
     return [child for child in bases.named_children if child.type in _REFERENCE_NODES]
+
+
+def _resolved_name(text: str, by_qname: dict[str, Symbol], table: dict[str, str],
+                   module_qname: str, package: str) -> str:
+    """A (dotted) name as the qualified name it refers to, where the file says."""
+    local = f"{module_qname}.{text}" if module_qname else text
+    if local in by_qname:
+        return local
+    head, _, rest = text.partition(".")
+    if head in table:
+        resolved = absolutize(table[head], package)
+        return f"{resolved}.{rest}" if rest else resolved
+    return text
+
+
+def _typed_receiver_call(callee, source: bytes, sym: Symbol, by_qname: dict[str, Symbol],
+                         locals_: dict[str, str], attrs_by_class: dict[str, dict[str, str]],
+                         resolve) -> tuple[Edge | None, bool]:
+    """A member lookup for `x.m()`, `self.a.m()` or `Cls.a.m()` with a known type.
+
+    Returns `(edge, keep_plain)`. `keep_plain` is true for `Cls.a.m()`: the
+    ordinary edge from that call to `Cls` is a real usage of the class and
+    stays. For a typed local or `self.a`, the ordinary hint (`x.m`) could
+    never resolve, so the member lookup replaces it.
+    """
+    if callee.type != "attribute":
+        return None, False
+    obj = callee.child_by_field_name("object")
+    method = callee.child_by_field_name("attribute")
+    if obj is None or method is None:
+        return None, False
+    name = _text(method, source)
+
+    def lookup(kind: str) -> Edge:
+        return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                    target_hint=f"{kind}.{name}", through_bases=True)
+
+    if obj.type == "identifier":
+        receiver = _text(obj, source)
+        if receiver in locals_:
+            return lookup(locals_[receiver]), False
+        return None, False
+    if obj.type != "attribute":
+        return None, False
+    owner_node = obj.child_by_field_name("object")
+    attr_node = obj.child_by_field_name("attribute")
+    if owner_node is None or attr_node is None or owner_node.type != "identifier":
+        return None, False
+    owner, attr = _text(owner_node, source), _text(attr_node, source)
+    if owner == "self":
+        cls = sym.qualified_name.rsplit(".", 1)[0]
+        kind = attrs_by_class.get(cls, {}).get(attr)
+        return (lookup(kind), False) if kind else (None, False)
+    owner_qname = resolve(owner)
+    same_file = by_qname.get(owner_qname)
+    if same_file is not None and same_file.kind == "class" \
+            and attr in attrs_by_class.get(owner_qname, {}):
+        return lookup(attrs_by_class[owner_qname][attr]), True
+    if same_file is not None or owner_qname != owner:
+        # An imported name, or a same-file class whose attribute is inherited:
+        # the writer looks the attribute up along the class's bases.
+        return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                    target_hint=f"{owner_qname}.{attr}.{name}", through_bases=True,
+                    via_attribute=True), True
+    return None, False
 
 
 def _member_call(

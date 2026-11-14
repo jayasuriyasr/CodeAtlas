@@ -76,7 +76,7 @@ _PROP_FIELDS = (
     "uid", "rel_path", "qualified_name", "name", "arity", "ordinal", "kind",
     "signature", "docstring", "source_code", "enclosing_signature",
     "search_text", "body_hash", "header_hash", "used_imports", "code_vec",
-    "start_line", "end_line", "is_client_component", "decorators", "bases",
+    "start_line", "end_line", "is_client_component", "decorators", "bases", "attributes",
 )
 
 
@@ -561,8 +561,9 @@ class GraphWriter:
         """
         if not edges:
             return []
-        wanted = [(e.target_hint.rsplit(".", 1)[0], e.target_hint.rsplit(".", 1)[1])
-                  for e in edges]
+        edges, wanted = self._through_attributes(repo_id, edges, report, batch_paths, epoch)
+        if not edges:
+            return []
         classes = self._class_bases(repo_id, {cls for cls, _ in wanted}, batch_paths, epoch)
         memo: dict[str, list[str] | None] = {}
         orders = {cls: _c3(cls, classes, memo) for cls, _ in wanted}
@@ -591,6 +592,67 @@ class GraphWriter:
                 metrics.incr("writer.member_resolved")
                 out.append(Edge(source_uid=edge.source_uid, kind=edge.kind,
                                 origin_path=edge.origin_path, target_uid=target))
+        return out
+
+    def _through_attributes(
+        self, repo_id: str, edges: list[Edge], report: WriteReport,
+        batch_paths: list[str], epoch: int,
+    ) -> tuple[list[Edge], list[tuple[str, str]]]:
+        """`(edges, [(class, method)])` with `Owner.attr.method` lookups turned
+        into `Type.method` lookups, or dropped as unresolved.
+
+        The attribute is looked up along Owner's resolution order: the first
+        class that declares it (`objects = TagManager()`) decides its type. An
+        opaque class reached first — a library base such as `models.Model`,
+        which supplies Django's default manager — means the type is unknown.
+        """
+        plain = [(e, *e.target_hint.rsplit(".", 1)) for e in edges if not e.via_attribute]
+        hops = [e for e in edges if e.via_attribute]
+        if hops:
+            owners = {e.target_hint.rsplit(".", 2)[0] for e in hops}
+            classes = self._class_bases(repo_id, owners, batch_paths, epoch)
+            attributes = self._class_attributes(repo_id, set(classes), batch_paths, epoch)
+            memo: dict[str, list[str] | None] = {}
+            for edge in hops:
+                owner, attr, method = edge.target_hint.rsplit(".", 2)
+                kind = None
+                for cls in _c3(owner, classes, memo) or []:
+                    if classes.get(cls) is None:
+                        break                        # opaque: the type is unknown
+                    kind = attributes.get(cls, {}).get(attr)
+                    if kind:
+                        break
+                if kind:
+                    plain.append((edge, kind, method))
+                else:
+                    report.edges_unresolved += 1
+                    metrics.incr("writer.member_attribute_unknown")
+        return [e for e, _c, _m in plain], [(c, m) for _e, c, m in plain]
+
+    def _class_attributes(
+        self, repo_id: str, qualified_names: set[str], batch_paths: list[str], epoch: int
+    ) -> dict[str, dict[str, str]]:
+        """`class -> {attribute: type}` from the classes' recorded `attributes`."""
+        if not qualified_names:
+            return {}
+        rows = self._run(
+            """
+            UNWIND $names AS n
+            MATCH (s:Symbol {repo_id: $repo_id, name: n.name})
+            WHERE s.qualified_name = n.qn AND s.kind = 'class'
+              AND NOT (s.origin_path IN $batch_paths AND s.epoch < $epoch)
+            RETURN n.qn AS qn, collect(coalesce(s.attributes, [])) AS attributes
+            """,
+            names=[{"qn": qn, "name": qn.rsplit(".", 1)[-1]} for qn in sorted(qualified_names)],
+            repo_id=repo_id,
+            batch_paths=batch_paths,
+            epoch=epoch,
+        )
+        out: dict[str, dict[str, str]] = {}
+        for row in rows:
+            if len(row["attributes"]) == 1:          # two definitions: no answer
+                out[row["qn"]] = dict(entry.split("=", 1) for entry in row["attributes"][0]
+                                      if "=" in entry)
         return out
 
     def _class_bases(

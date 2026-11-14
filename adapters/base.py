@@ -108,6 +108,10 @@ class Symbol:
     #: writer walks these to resolve `self.method()` to an inherited method,
     #: and declaration order is what Python's MRO is computed from.
     bases: list[str] = field(default_factory=list)
+    #: A class's attributes whose type is certain, as `name=Type` (absolute
+    #: where the imports say so): `objects=tags.managers.TagManager`. The
+    #: writer reads them to resolve `Model.objects.method()` across files.
+    attributes: list[str] = field(default_factory=list)
 
     # Position. Mutable properties, deliberately not UID inputs (§3.2).
     start_line: int = 0
@@ -155,6 +159,10 @@ class Edge:
     #: With `through_bases`: a `super()` call, so the class itself is skipped
     #: and the lookup starts at the next class in its resolution order.
     after_owner: bool = False
+    #: With `through_bases`: the hint is `Owner.attribute.method`. The writer
+    #: looks up the attribute's type on Owner (or a base) and resolves the
+    #: method on that type.
+    via_attribute: bool = False
 
 
 def edge_target_name(edge: Edge, by_qname: dict[str, Symbol]) -> str:

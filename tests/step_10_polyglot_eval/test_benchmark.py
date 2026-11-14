@@ -58,7 +58,8 @@ def test_jedi_and_sei_are_scored_against_each_other(repo, graph_db, tmp_path_fac
     # jedi sees both calls to `cents`, and `till.total(...)` through the local's type.
     assert by_name["shop.money.cents"].gold == {"shop.money.Till.total", "shop.orders.place"}
     assert by_name["shop.money.Till.total"].gold == {"shop.money.Till.receipt", "shop.orders.place"}
-    # SEI resolves `self.total`, not `till.total` on a local: the gap being measured.
-    assert by_name["shop.money.Till.total"].found == {"shop.money.Till.receipt"}
-    assert result.precision == 1.0 and result.recall == pytest.approx(3 / 4)
+    # `till = Till()` then `till.total(...)`: the local's type is certain, so
+    # SEI resolves it too (this pinned the gap before receivers were typed).
+    assert by_name["shop.money.Till.total"].found == {"shop.money.Till.receipt", "shop.orders.place"}
+    assert result.precision == 1.0 and result.recall == 1.0
     assert "| shop |" in render([result])
