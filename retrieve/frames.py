@@ -4,6 +4,10 @@ Three tiers, and the middle one is the interesting one:
 
 * **Tier 0 — Direct (Python).** Normalize to repo-relative, then
   `(repo_id, rel_path, start_line <= N <= end_line)`. Deterministic.
+* **Tier 1 — Source map (TS/JS).** A compiled frame whose build left a `.map`
+  beside it is mapped back to its source line, then resolved as Tier 0 does.
+  By position, so a shared or minified name does not matter. §8.3 decides this
+  tier on TS/TSX TRACE resolution < 0.70; the golden set measured 3 of 9.
 * **Tier 2 — Name match (TS/JS/TSX).** Exactly one candidate resolves.
   **More than one is a refusal**, not a choice.
 * **Tier 3 — SEMANTIC fallback.** Re-route on the error message plus any
@@ -24,12 +28,13 @@ And the consequence, which is a trust argument rather than an accuracy one:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Collection, Protocol, Sequence
 
 import metrics
 from adapters.base import normalize_rel_path
+from retrieve import sourcemap
 
 # --------------------------------------------------------------------------
 # Parsing
@@ -45,6 +50,8 @@ class StackFrame:
     line_no: int | None
     fn_name: str | None
     language: str = "unknown"
+    #: V8 prints a column; the source-map tier needs it, nothing else does.
+    col_no: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,11 +64,12 @@ class ResolvedFrame:
 
     frame: StackFrame
     uid: str | None
-    tier: str                       # "direct" | "name" | "semantic" | "unresolved"
+    tier: str      # "direct" | "sourcemap" | "name" | "semantic" | "unresolved"
     confidence: float
 
     BADGES = {
         "direct": "✓ direct",
+        "sourcemap": "✓ source map",
         "name": "~ name match",
         "semantic": "? semantic",
         "unresolved": "? unresolved",
@@ -141,6 +149,7 @@ def parse_stack_trace(text: str) -> list[StackFrame]:
                 line_no=int(match.group("line")),
                 fn_name=match.group("fn"),
                 language="javascript",
+                col_no=int(match.group("col")),
             )
         )
 
@@ -258,6 +267,8 @@ class FrameResolver:
     #: The graph's `:File` paths, for matching a trace recorded on another
     #: machine by path suffix. Optional: without it Tier 0 needs `repo_root`.
     known_paths: Collection[str] | None = None
+    #: Parsed source maps, by path: a trace names the same chunk many times.
+    _maps: dict = field(default_factory=dict, repr=False)
 
     def resolve(self, repo_id: str, frame: StackFrame) -> ResolvedFrame:
         """One frame, through the tiers in order."""
@@ -271,6 +282,10 @@ class FrameResolver:
             # Django's `dispatch` is a confident citation into the wrong file.
             metrics.incr("trace.library_frame")
             return ResolvedFrame(frame, None, "unresolved", 0.0)
+
+        mapped = self._tier1(repo_id, frame)
+        if mapped is not None:
+            return mapped
 
         direct = self._tier0(repo_id, frame)
         if direct is not None:
@@ -301,6 +316,46 @@ class FrameResolver:
         metrics.incr("trace.tier0.resolved")
         metrics.incr("frames_resolved_by_tier.direct")
         return ResolvedFrame(frame, found.uid, "direct", 1.0)
+
+    # -- Tier 1 ------------------------------------------------------------
+
+    def _tier1(self, repo_id: str, frame: StackFrame) -> ResolvedFrame | None:
+        """Source map: the compiled position, mapped back. None falls through.
+
+        Falls through, unchanged, when there is no map, the position maps to
+        no source, or the map is stale — its embedded source differs from the
+        file on disk, so its line numbers may point anywhere. A map that says
+        the code came from outside the repository is an answer: library code,
+        unresolved, and Tier 2 is not tried.
+        """
+        if (self.repo_root is None or frame.file_path is None
+                or frame.line_no is None or frame.col_no is None):
+            return None
+        map_path = sourcemap.map_for(frame.file_path, Path(self.repo_root))
+        if map_path is None:
+            return None
+        source_map = self._maps.get(map_path)
+        if source_map is None:
+            source_map = self._maps[map_path] = sourcemap.load(map_path) or {}
+        original = sourcemap.original_position(source_map, frame.line_no, frame.col_no)
+        if original is None:
+            metrics.incr("trace.sourcemap.unmapped")
+            return None
+        rel_path = sourcemap.source_path(source_map, original.source, map_path,
+                                         Path(self.repo_root))
+        if rel_path is None or is_library_path(rel_path):
+            metrics.incr("trace.sourcemap.library")
+            return ResolvedFrame(frame, None, "unresolved", 0.0)
+        if sourcemap.is_stale(source_map, original.source, Path(self.repo_root), rel_path):
+            metrics.incr("trace.sourcemap.stale")
+            return None
+        found = self.reader.symbol_at_line(
+            repo_id, normalize_path(rel_path, self.repo_root, self.known_paths), original.line)
+        if found is None:
+            metrics.incr("trace.sourcemap.no_symbol")
+            return None
+        metrics.incr("frames_resolved_by_tier.sourcemap")
+        return ResolvedFrame(frame, found.uid, "sourcemap", 1.0)
 
     # -- Tier 2 ------------------------------------------------------------
 

@@ -112,7 +112,7 @@ moves a class score by 6.7 points.
 | Cited claims whose cited block lacks a code name they mention | 7 of 55 | — |
 | Relation precision (relation claims the graph confirms) | 0.750, over 4 claims | ≥ 0.90 |
 | Answers that needed the one retry | 11 – 13 of 45 | — |
-| TS/TSX stack frames resolved to a symbol | 3 of 9 | — |
+| TS/TSX stack frames resolved to a symbol (golden set: no build output, so no source maps) | 3 of 9 | — |
 | Time to first token, p50 / p95, model already loaded | 0.51 s / 1.03 s | ≤ 1.2 s / 2.5 s |
 | Inbound edges kept across a `git mv` | 1.000 | ≥ 0.95 |
 | Embedding cache hit rate on an unchanged re-index | 1.000 | ≥ 0.90 |
@@ -167,6 +167,16 @@ What the table does not say on its own:
 - **The classifier row is not a measurement on model output.** It scores the
   classifier on reference sentences the author wrote, with the gold symbols
   passed in as known names.
+- **Why 6 of 9 TypeScript frames do not resolve.** Three name `GET` or `POST`,
+  which several route files export, so they are refused as ambiguous; one is
+  minified (`t`); one is `<anonymous>`, with no position; and one is
+  `formatName`, imported from a file the fixture does not contain. The golden
+  set has no build output, so the source-map tier cannot run there and the row
+  stays 3 of 9. On a chunk TypeScript 5.6.3 built from two route files that both
+  export `GET` and `POST` (`tests/step_07_router_frames/test_sourcemap_tier.py`),
+  the shared and minified names resolve to the right file and function through
+  the map. `<anonymous>` and a symbol the repository lacks cannot resolve by
+  any route.
 - **The hosted models are unmeasured.** `ANTHROPIC_API_KEY` and
   `VOYAGE_API_KEY` switch the answers and the embeddings to hosted models;
   none of the numbers above apply to them.
@@ -179,9 +189,12 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
 - Call resolution is syntactic: `self.x()` and imported names resolve, calls on
   other objects do not. There is no type inference.
 - Structural answers are one hop: direct callers, direct subclasses.
-- TypeScript stack frames from bundled code (`.next/server/chunks/…`) can only be
-  matched by name; there is no source-map support, so ambiguous names are
-  refused rather than guessed.
+- TypeScript stack frames from bundled code (`.next/server/chunks/…`) resolve
+  through the build's source map when the `.map` is on disk beside the chunk
+  (Next.js writes server maps only when configured to). Without one they are
+  matched by name, and a shared name (`GET`) or a minified one (`t`) is refused
+  rather than guessed. A map whose embedded source differs from the file on
+  disk is not used. Index maps (`sections`) are not read.
 - The packer counts tokens with an approximation that over-counts (measured
   against the local model's own tokenizer: 0.52–0.94 real tokens per counted
   one). It errs toward too little context, never a truncated prompt.

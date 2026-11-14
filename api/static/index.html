@@ -327,7 +327,7 @@ function renderRoute(turn) {
   }
   if (n.frames && n.frames.length) {
     turn.framesEl.innerHTML = n.frames.map((f) => {
-      const cls = f.tier === "direct" ? "ok" : (f.tier === "name" ? "warn" : "bad");
+      const cls = (f.tier === "direct" || f.tier === "sourcemap") ? "ok" : (f.tier === "name" ? "warn" : "bad");
       return `<li><span class="badge ${cls} tier">${esc(f.badge)}</span><span class="mono">${esc(f.frame)}</span></li>`;
     }).join("");
   }
