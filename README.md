@@ -239,8 +239,9 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
   if I change X" walk up to `MULTIHOP_MAX_DEPTH` (4) levels and
   `MULTIHOP_MAX_RESULTS` (50) symbols, and say when they stop at the cap.
 - TypeScript stack frames from bundled code (`.next/server/chunks/…`) resolve
-  through the build's source map when the `.map` is on disk beside the chunk
-  (Next.js writes server maps only when configured to). Without one they are
+  through the build's source map when the build left a `.map` on disk beside
+  the chunk; whether it does depends on the build's settings, and only maps
+  produced by `tsc` were tested, not a real Next.js build. Without one they are
   matched by name, and a shared name (`GET`) or a minified one (`t`) is refused
   rather than guessed. A map whose embedded source differs from the file on
   disk is not used. Index maps (`sections`) are not read.
