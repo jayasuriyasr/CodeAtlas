@@ -26,7 +26,12 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import metrics
-from config import RERANK_TOP_K, STRUCTURAL_RESULT_LIMIT
+from config import (
+    MULTIHOP_MAX_DEPTH,
+    MULTIHOP_MAX_RESULTS,
+    RERANK_TOP_K,
+    STRUCTURAL_RESULT_LIMIT,
+)
 
 #: Router rule -> (direction from the entity, relationship types). "in" means
 #: edges pointing *at* the entity (its callers, importers, users).
@@ -115,6 +120,25 @@ RETURN t.term AS term, s.uid AS uid, s.qualified_name AS qualified_name,
 ORDER BY s.qualified_name
 """
 
+#: One hop of the multi-hop walk: callers of the frontier, directly or
+#: through an override, with the frontier node each was reached from.
+_IMPACT_HOP = """
+    MATCH (t:Symbol {repo_id: $repo_id}) WHERE t.uid IN $uids
+    CALL (t) {
+        MATCH (n:Symbol {repo_id: $repo_id})-[r]->(t)
+        WHERE type(r) IN $types
+        RETURN n
+        UNION
+        MATCH (t)-[:OVERRIDES*1..3]->(base:Symbol {repo_id: $repo_id})
+        MATCH (n:Symbol {repo_id: $repo_id})-[r]->(base)
+        WHERE type(r) IN $types
+        RETURN n
+    }
+    RETURN DISTINCT n.uid AS uid, n.qualified_name AS qualified_name, t.uid AS parent,
+           n.rel_path AS rel_path, n.start_line AS start_line
+    ORDER BY rel_path, start_line, uid, parent
+"""
+
 _TRAVERSE = {
     # Direct callers (via = ""), plus callers of the methods the entity
     # overrides, up to three levels up (via = the overridden method). One
@@ -193,6 +217,11 @@ class StructuralAnswer:
     #: Related symbols reached through dispatch: uid -> the overridden
     #: method they call, which the entity overrides.
     via: dict[str, str] = field(default_factory=dict)
+    #: Multi-hop only: uid -> the call path, from that symbol down to the
+    #: entity; whether the walk stopped at the result cap; its depth limit.
+    paths: dict[str, list[str]] = field(default_factory=dict)
+    truncated: bool = False
+    depth_limit: int | None = None
 
     def note(self) -> dict:
         note = {
@@ -205,6 +234,9 @@ class StructuralAnswer:
             note["fallback"] = self.fallback
         if self.candidates:
             note["candidates"] = self.candidates
+        if self.depth_limit is not None:
+            note["depth_limit"] = self.depth_limit
+            note["truncated"] = self.truncated
         return note
 
 
@@ -213,6 +245,8 @@ class StructuralResolver:
     runner: Runner
     max_entities: int = RERANK_TOP_K
     result_limit: int = STRUCTURAL_RESULT_LIMIT
+    max_depth: int = MULTIHOP_MAX_DEPTH
+    max_related: int = MULTIHOP_MAX_RESULTS
 
     def answer(self, repo_id: str, question: str, rule: str | None) -> StructuralAnswer:
         answer = StructuralAnswer(rule=rule or "unknown")
@@ -269,6 +303,9 @@ class StructuralResolver:
             answer.fallback = "no symbol in the graph matches the question"
             return answer
 
+        if rule == "impact":
+            return self._impact(repo_id, answer)
+
         traversal = TRAVERSALS.get(rule or "")
         if traversal is None:
             # A rule with no edge type behind it. The entity is still useful
@@ -295,4 +332,51 @@ class StructuralResolver:
         answer.total_related = len(seen)
         answer.related_uids = seen[: self.result_limit]
         metrics.incr("structural.answered")
+        return answer
+
+    def _impact(self, repo_id: str, answer: StructuralAnswer) -> StructuralAnswer:
+        """Callers, transitively: a breadth-first walk up the call graph.
+
+        Bounded twice. `max_depth` levels, so a question stays a question about
+        the neighbourhood of X; and `max_related` results, past which the walk
+        stops and the answer says it stopped. Each result keeps the path that
+        reached it first — the shortest, since the walk is breadth-first.
+        Dispatch through overrides is followed at every level.
+        """
+        answer.depth_limit = self.max_depth
+        names = dict(zip(answer.entity_uids, answer.entity_names, strict=True))
+        parent: dict[str, str] = {}
+        seen = set(answer.entity_uids)
+        frontier = list(answer.entity_uids)
+        order: list[str] = []
+        for _depth in range(self.max_depth):
+            if not frontier:
+                break
+            rows = self.runner.run(_IMPACT_HOP, repo_id=repo_id, uids=frontier,
+                                   types=["CALLS", "INVOKES_HOOK"])
+            frontier = []
+            for row in rows:
+                if row["uid"] in seen:
+                    continue
+                if len(order) >= self.max_related:
+                    answer.truncated = True
+                    break
+                seen.add(row["uid"])
+                parent[row["uid"]] = row["parent"]
+                names[row["uid"]] = row["qualified_name"]
+                order.append(row["uid"])
+                frontier.append(row["uid"])
+            if answer.truncated:
+                break
+        for uid in order:
+            path, node = [names[uid]], uid
+            while node in parent:
+                node = parent[node]
+                path.append(names[node])
+            answer.paths[uid] = path
+        answer.related_uids = order
+        answer.total_related = len(order)
+        metrics.incr("structural.impact")
+        if answer.truncated:
+            metrics.incr("structural.impact_truncated")
         return answer

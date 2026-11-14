@@ -309,7 +309,9 @@ function renderRoute(turn) {
   const parts = [`<span class="pill"><b>${esc(n.route_taken || n.route || "")}</b></span>`];
   if (n.structural && !n.structural.fallback) {
     parts.push(`${esc(n.structural.rule)} of <code>${esc((n.structural.entity || []).join(", "))}</code>: `
-      + `${n.structural.related_total} found, ${n.structural.related_shown} shown`);
+      + `${n.structural.related_total} found, ${n.structural.related_shown} shown`
+      + (n.structural.depth_limit != null ? ` within ${n.structural.depth_limit} hops` : "")
+      + (n.structural.truncated ? ` — stopped at the result cap; there are more` : ""));
   } else if (n.structural && n.structural.fallback) {
     parts.push(`${esc(n.structural.fallback)} — answered by search instead`);
   }
@@ -320,7 +322,8 @@ function renderRoute(turn) {
     turn.framesEl.innerHTML = related.map((r) =>
       `<li><span class="badge ${r.via ? "warn" : "ok"} tier">${r.via ? "through dispatch" : "from the graph"}</span>`
       + `<span class="mono" title="${r.via ? esc("calls " + r.via + ", which this method overrides") : ""}">${esc(r.qualified_name)}`
-      + ` <span style="color:var(--muted)">${esc(r.rel_path)}:${r.start_line}</span></span></li>`).join("");
+      + ` <span style="color:var(--muted)">${esc(r.rel_path)}:${r.start_line}`
+      + `${r.path && r.path.length > 1 ? " · " + esc(r.path.join(" → ")) : ""}</span></span></li>`).join("");
   }
   if (n.frames && n.frames.length) {
     turn.framesEl.innerHTML = n.frames.map((f) => {

@@ -40,6 +40,12 @@ class QueryClass(str, Enum):
 #: recognised by its auxiliary — "does"/"do" after the question word — which
 #: "what calls X" never has.
 _STRUCTURAL = (
+    # Multi-hop first: "what eventually calls X" also reads as "what … calls".
+    ("impact", re.compile(r"\b(eventually|transitively|indirectly|ultimately)\s+"
+                          r"(calls?|reach(es)?|depends?\s+on)\b", re.I)),
+    ("impact", re.compile(r"\bwhat\s+(is|would\s+be|gets)\s+affected\s+(if|by|when)\b", re.I)),
+    ("impact", re.compile(r"\bwhat\s+(breaks|would\s+break)\s+if\b", re.I)),
+    ("impact", re.compile(r"\b(impact|blast\s+radius)\s+of\s+(changing\s+)?", re.I)),
     ("callees", re.compile(r"\b(what|who|which)\b(\s+\w+)?\s+(does|do)\b.{0,40}\bcall\b", re.I)),
     ("callers", re.compile(r"\b(what|who|which)\b.{0,20}\bcalls?\b", re.I)),
     ("callers", re.compile(r"\bcallers?\s+of\b", re.I)),

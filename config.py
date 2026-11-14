@@ -260,6 +260,12 @@ VECTOR_MAX_FETCH: int = 16_384
 #: exists — a 400-caller hub is "400 callers, 50 shown", never "50 callers".
 STRUCTURAL_RESULT_LIMIT: int = 50
 
+#: † Multi-hop questions ("what eventually calls X", "what is affected if I
+#: change X"): how many call levels are walked, and how many symbols are
+#: returned before the walk stops and says so.
+MULTIHOP_MAX_DEPTH: int = 4
+MULTIHOP_MAX_RESULTS: int = 50
+
 #: Lucene rejects a query with more than 1,024 clauses (`maxClauseCount`). A
 #: pasted file or log as a "question" tokenizes past that and would fail the
 #: whole fulltext arm, so the query keeps its first terms and drops the rest.

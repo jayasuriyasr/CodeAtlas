@@ -436,13 +436,18 @@ def _print_notes(notes: dict) -> None:
             f"# {structural['rule']} of {', '.join(structural['entity']) or '?'}: "
             f"{structural['related_total']} found, {structural['related_shown']} shown"
         )
+        if structural.get("depth_limit") is not None:
+            line += f" (within {structural['depth_limit']} hops)"
+        if structural.get("truncated"):
+            line += " — stopped at the result cap; there are more, so narrow the question"
         if structural.get("fallback"):
             line += f" — {structural['fallback']}; answered semantically"
         print(line, file=sys.stderr)
         for item in structural.get("related", []):
             via = f"  (through dispatch: calls {item['via']})" if item.get("via") else ""
-            print(f"#   {item['rel_path']}:{item['start_line']}  {item['qualified_name']}{via}",
-                  file=sys.stderr)
+            path = f"  [{' → '.join(item['path'])}]" if item.get("path") else ""
+            where = f"{item['rel_path']}:{item['start_line']}"
+            print(f"#   {where}  {item['qualified_name']}{via}{path}", file=sys.stderr)
     for frame in notes.get("frames", []):
         print(f"# {frame['badge']:<14} {frame['frame']}", file=sys.stderr)
 
