@@ -42,7 +42,10 @@ stand.
 
 **The largest single cause of misses** is #4's pattern, a method called on a
 class named directly, usually a classmethod the class inherits. It accounts
-for 8 of the 17 sampled misses, and 26 of all 92. SEI does not resolve it yet.
+for 8 of the 17 sampled misses, and 26 of all 92. Resolved since: a method on a
+class named directly is looked up along the class's resolution order, and
+django-filter's recall went from 0.748 to 0.814 (62 callers missed, not 84),
+with precision unchanged.
 
 ## healthchecks v5.0.3 (`51a50353`), added later the same day
 

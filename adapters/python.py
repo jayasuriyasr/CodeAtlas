@@ -693,7 +693,16 @@ def _typed_receiver_call(callee, source: bytes, sym: Symbol, by_qname: dict[str,
         receiver = _text(obj, source)
         if receiver in locals_:
             return lookup(locals_[receiver]), False
-        return None, False
+        named = resolve(receiver)
+        if named == receiver or f"{named}.{name}" in by_qname:
+            # Unknown, or defined right here on that class: the ordinary edge.
+            return None, False
+        # `FilterSet.filter_for_field()`: an import or a same-file name, maybe
+        # a class whose method is inherited. The ordinary edge stays too, for
+        # when the name is a module (`curl.post()`).
+        return Edge(source_uid=sym.uid, kind="CALLS", origin_path=sym.rel_path,
+                    target_hint=f"{named}.{name}", through_bases=True,
+                    if_class=True), True
     if obj.type != "attribute":
         return None, False
     owner_node = obj.child_by_field_name("object")

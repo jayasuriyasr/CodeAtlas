@@ -163,6 +163,12 @@ class Edge:
     #: looks up the attribute's type on Owner (or a base) and resolves the
     #: method on that type.
     via_attribute: bool = False
+    #: With `through_bases`: the receiver is a bare name (`FilterSet.m()`) that
+    #: may not be a class at all — `curl.post()` calls a module's function.
+    #: When it is not exactly one class in the repository, the writer drops
+    #: the lookup without counting it, since the ordinary edge for the same
+    #: call stands.
+    if_class: bool = False
 
 
 def edge_target_name(edge: Edge, by_qname: dict[str, Symbol]) -> str:

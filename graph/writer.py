@@ -579,6 +579,11 @@ class GraphWriter:
 
         out: list[Edge] = []
         for edge, (cls, method) in zip(edges, wanted, strict=True):
+            if edge.if_class and classes.get(cls) is None:
+                # `curl.post()`, `timezone.now()`: not a repository class, so
+                # nothing to look up; the ordinary edge for the call stands.
+                metrics.incr("writer.member_not_a_class")
+                continue
             order = orders[cls]
             if order is not None and edge.after_owner:
                 order = order[1:]                 # super(): start after the class

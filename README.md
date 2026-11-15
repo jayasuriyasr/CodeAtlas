@@ -132,17 +132,18 @@ the gold finds none for counts as wrong:
 | Repository (pinned commit) | Gold | Functions examined | With gold callers | Precision, where the gold has callers | Precision, all | Recall |
 |---|---|---|---|---|---|---|
 | django-taggit 6.1.0 (`4e5f7de6`) | jedi | 273 (all) | 45 | 1.000 | 1.000 | 0.915 |
-| django-filter 26.2 (`daddf7b6`) | jedi | 745 (all) | 95 | 0.996 | 0.988 | 0.748 |
+| django-filter 26.2 (`daddf7b6`) | jedi | 745 (all) | 95 | 0.996 | 0.989 | 0.814 |
 | healthchecks v5.0.3 (`51a50353`), a Django application | jedi | 2,760 (all) | 319 | 0.887 | 0.854 | 0.807 |
 | taxonomy (`298a8857`), a Next.js App Router application | tsserver | 130 (all) | 28 | 1.000 | 1.000 | 0.990 |
 
 An earlier version of this table said "every function" but scored the first 60
 in sorted file order: django-filter recall 0.369 there, against 0.471 for the
 same code over every function. Calls on objects whose type the code states
-(`till = Till()`, a typed parameter, a class attribute) raised that to 0.748.
-Of the 84 callers still missed in django-filter, 49 are method calls on locals
-bound more than once or by a loop or `with` — SEI types a local only when one
-assignment fixes it — and 14 are call chains or indexing. Every disagreement
+(`till = Till()`, a typed parameter, a class attribute) raised that to 0.748,
+and methods called on a class named directly to 0.814. Of the 62 callers still
+missed in django-filter, 27 are method calls on locals bound more than once or
+by a loop or `with` — SEI types a local only when one assignment fixes it — and
+14 are call chains or indexing. Every disagreement
 is listed in `eval/BENCHMARK_REPORT.md`, which the run writes.
 
 The gold was checked too ([read by hand](eval/benchmark_hand_check.md)):
@@ -150,9 +151,10 @@ The gold was checked too ([read by hand](eval/benchmark_hand_check.md)):
 - **django-taggit and django-filter, 20 disagreements:** all three callers only
   SEI reports are real calls jedi does not attribute (in a lambda, in a nested
   `def`, through `super()`), so jedi was wrong in 3 of 20. In the 17 sampled
-  misses jedi was right. The largest cause of misses is a method called on a
+  misses jedi was right. The largest cause of misses was a method called on a
   class named directly (`FilterSet.filter_for_field(…)`, an inherited
-  classmethod): 26 of the 92, not resolved yet.
+  classmethod): 26 of the 92. Resolving it raised django-filter's recall from
+  0.748 to 0.814.
 - **healthchecks' lower precision is jedi's, not SEI's.** All 201 callers SEI
   reports there and jedi does not have a call by that name in the caller's body
   — 140 of them `super().setUp()` in tests, the rest inherited `self.post()`,
@@ -251,12 +253,12 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
 ## Known limitations
 
 - Call resolution has no type inference. `self.x()`, `super().x()`, imported
-  names, and calls on an object whose type the code states (`till = Till()`
-  assigned once, a typed parameter, a class attribute, `self.a` set once in
-  `__init__`) resolve, through the class hierarchy. A local bound twice, a call
-  on a call's result, and a method called on a class named directly
-  (`FilterSet.filter_for_field(…)`) do not. TypeScript resolves `this.x()` and
-  imports only.
+  names, a method called on a class named directly
+  (`FilterSet.filter_for_field(…)`), and calls on an object whose type the code
+  states (`till = Till()` assigned once, a typed parameter, a class attribute,
+  `self.a` set once in `__init__`) resolve, through the class hierarchy. A
+  local bound twice and a call on a call's result do not. TypeScript resolves
+  `this.x()`, same-file names and imports only.
 - "What calls X" is one hop, plus the callers of the method X overrides
   (marked "through dispatch"). "What eventually calls X" and "what is affected
   if I change X" walk up to `MULTIHOP_MAX_DEPTH` (4) levels and
