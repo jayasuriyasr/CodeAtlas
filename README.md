@@ -3,20 +3,79 @@
 *CodeAtlas is the repository; SEI is the engine inside it, and the name its
 command (`sei`), environment variables (`SEI_*`) and package use.*
 
-**SEI — Software Engineering Investigation Engine.** Repository-level GraphRAG
-over Python/Django and TypeScript/Next.js codebases: ask a question about a
-repository and get a streamed answer whose claims cite the code they came
-from, with each citation checked as described below.
+**SEI — Software Engineering Investigation Engine.** Ask a question about a
+Python/Django or TypeScript/Next.js repository and get an answer whose every
+claim cites the code it came from — with each citation checked, and what the
+check could not confirm marked rather than hidden. It runs on one machine: a
+code graph in Neo4j, local models through Ollama, nothing sent anywhere.
+
+## What it looks like
+
+A graph question. The traversal is the answer; the model only phrases it.
+Real output on the Django fixture, trimmed of start-up notes, counters and
+timings (this run included a cold model load):
+
+```text
+$ python -m api.cli --repo demo --root tests/fixtures/repos/django_min --ai local "what eventually calls \`charge_card\`"
+# route: STRUCTURAL
+# impact of billing.tasks.charge_card: 3 found, 3 shown (within 4 hops)
+#   billing/tasks.py:18  billing.tasks.run_monthly_billing  [billing.tasks.run_monthly_billing → billing.tasks.charge_card]
+#   billing/tasks.py:29  billing.tasks.retry_failed  [billing.tasks.retry_failed → billing.tasks.charge_card]
+#   billing/views.py:18  billing.views.SubscriptionView.post  [billing.views.SubscriptionView.post → billing.tasks.charge_card]
+The `charge_card` function is called by the `run_monthly_billing` function in [C2].
+
+Coverage 1.00 · RelationPrec 1.00 · ConflictFlags 0
+```
+
+A search question, answered by `qwen2.5-coder:7b`:
+
+```text
+$ SEI_LOCAL_LLM=qwen2.5-coder:7b python -m api.cli --repo demo --root tests/fixtures/repos/django_min --ai local "how are API tokens issued"
+# route: SEMANTIC
+API tokens are issued by the `issue_token` function in `authx/services.py` [C1]. This function generates a new token, associates it with a user, and logs the event [C1]. The token is then returned to the caller [C1].
+
+# Claims
+  ✓                    API tokens are issued by the `issue_token` function in `authx/services.py` [C1].
+  ✓                    This function generates a new token, associates it with a user, and logs the event [C1].
+  ✓                    The token is then returned to the caller [C1].
+
+# Sources
+  [C1] authx/services.py:21  authx.services.issue_token
+```
+
+The default 3B model answered the same question without a single handle,
+retried once, and every claim came back marked `⚠ uncited`. That is the
+system working as designed — and the reason the first headline below is not
+higher.
+
+## Headline numbers
+
+All re-runnable; details, method and caveats in [Results](#results).
+
+- **Grounding depends on the model.** Citation coverage is 0.80–0.92 with
+  the default `qwen2.5-coder:3b` (the gate is 0.85, so it passes on some runs)
+  and 1.00 with `qwen2.5-coder:7b`, which on a 4 GB GPU misses the latency gate.
+- **"What calls X" against a language server**, on four pinned open-source
+  repositories (two Django libraries, a Django application, a Next.js app),
+  every function scored: precision 0.887–1.000, recall 0.807–0.990.
+- **On a 7,363-file Next.js monorepo** (cal.com) on a laptop: first index 23
+  minutes (GPU-bound embedding), warm restart 8.4 s, "what calls X" 7 ms p50,
+  a saved file searchable in 3.7 s.
+
+## What it does
 
 - **Indexes a codebase into a graph.** Tree-sitter parses Python and TypeScript
   into symbols (functions, classes, modules) and edges (calls, imports,
-  definitions, inheritance, Django URL dispatch, React hooks). They are written
-  to Neo4j with a vector embedding per symbol. Calls through `self`, `cls`,
-  `this` and `super()` are resolved along the class's method resolution order; calls on other
-  objects (`order.ship()`) are not, because that needs type inference.
+  definitions, inheritance, overrides, Django URL dispatch, React hooks). They
+  are written to Neo4j with a vector embedding per symbol. Calls through `self`,
+  `cls`, `this` and `super()`, calls on an object whose type the code states
+  (`till = Till()`), and calls on a class named directly are resolved along the
+  class's method resolution order. There is no type inference beyond that.
 - **Routes each question to the retrieval it needs.** "What calls `X`" is
-  answered by traversing the graph one hop; a pasted stack trace is resolved
-  frame by frame to the symbols it names; anything else goes to hybrid fulltext +
+  answered from the graph — direct callers plus callers through an overridden
+  method; "what eventually calls `X`" walks up to four levels and shows the
+  path to each. A pasted stack trace is resolved frame by frame, through the
+  build's source map when there is one. Anything else goes to hybrid fulltext +
   vector search fused with reciprocal rank fusion, then one hop of graph
   expansion. A name that matches several symbols is answered with the list of
   candidates, not with all of them merged.
@@ -28,12 +87,14 @@ from, with each citation checked as described below.
   appear in the block it cites (a cheap check: it catches citations of unrelated
   code, not wrong statements about the right code). Relation claims written in a
   recognised form ("`a` calls `b`", "`X` is called by the `Y` method",
-  "inherits from") are looked up in the graph. A poorly grounded answer gets one
-  bounded retry, and whatever is still unsupported is marked, not hidden.
+  "inherits from") are looked up in the graph; one the graph cannot rule out is
+  "unverified", never "contradicted". A poorly grounded answer gets one bounded
+  retry, and whatever is still unsupported is marked, not hidden.
 - **Keeps the index current.** Saves are debounced and re-indexed
-  incrementally; a changed signature re-links the callers in other files; file
-  moves keep their inbound edges; embeddings are cached so an unchanged symbol
-  is never re-embedded.
+  incrementally; a changed signature re-links the callers in other files, and
+  a call saved before its target existed is linked when the target appears;
+  file moves keep their inbound edges; embeddings are cached so an unchanged
+  symbol is never re-embedded.
 
 How it works — the architecture, the invariants it keeps, the trade-offs and
 the known limitations — is in [DESIGN.md](DESIGN.md).
@@ -277,6 +338,28 @@ report, with every answer, to `eval/GATE_REPORT_local.md`.
   `repo_id`, and the vector search widens its fetch so a small repository is
   not crowded out by a large one.
 - The default local answer model is research-licensed (see above).
+
+## What I'd do next
+
+In order of what each would change, with the evidence for it:
+
+1. **Measure retrieval on real code.** Every retrieval number above comes from
+   two small fixtures written for this project. A few hundred questions on a
+   real repository, with answers checked by someone other than the author, is
+   the measurement this project most lacks.
+2. **Make grounding pass on a 4 GB GPU.** The 3B model cites 80–92% of its
+   claims; the 7B cites all of them and is too slow here. A second, cheap pass
+   that asks only for the handle of each uncited sentence is the next thing to
+   try; a tighter answer format was tried and made the 3B worse.
+3. **Type receivers in TypeScript** the way Python's are (`const t = new
+   Till()`), which is most of what TypeScript call resolution lacks.
+4. **Make the graph searchable before its vectors exist.** A first index is
+   74% embedding time; search by name and graph could start minutes earlier.
+5. **Watch the file system instead of polling it.** A poll is now 325 ms on
+   7,363 files, but it is still a full pass every second.
+6. **Use the model's real tokenizer in the packer, and tune the † constants**
+   (`config.py`) against measurements instead of the current guesses.
+7. **Measure the hosted models**, which need an API key this was never run with.
 
 ## Running it on macOS or Linux
 
