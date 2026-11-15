@@ -66,6 +66,15 @@ def constructed_type(value, source: bytes) -> str | None:
     callee = value.child_by_field_name("function")
     if callee is None or callee.type not in ("identifier", "attribute"):
         return None
+    # The whole callee must be a dotted name. `Model.objects.filter(…).first`
+    # is an attribute too, but of a call's result: not a class anyone named.
+    head = callee
+    while head.type == "attribute":
+        head = head.child_by_field_name("object")
+        if head is None:
+            return None
+    if head.type != "identifier":
+        return None
     text = _text(callee, source)
     if text.split(".", 1)[0] in ("self", "cls", "super"):
         return None
