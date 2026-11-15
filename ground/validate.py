@@ -133,6 +133,9 @@ class RelationVerdict:
     subject_found: bool
     object_found: bool
     edge_found: bool
+    #: The subject's file holds a call ending in the object's name that the
+    #: graph could not resolve (`File.waiting`): the graph cannot say "no".
+    unresolved_call: bool = False
 
     @property
     def verified(self) -> bool:
@@ -148,8 +151,15 @@ class RelationVerdict:
         endpoint means "the graph does not know", not "the model is wrong".
         Counting those as conflicts would fire §6.3's retry on answers that
         were right.
+
+        The same holds for a call the graph saw and could not resolve:
+        `token.revoke()` on a loop variable is recorded in the file's waiting
+        list, so "`revoke_all` calls `revoke`" is unverified, not refuted. The
+        record is per file, which errs the safe way: a neighbour's unresolved
+        call can only turn a contradiction into "unverified".
         """
-        return self.subject_found and self.object_found and not self.edge_found
+        return (self.subject_found and self.object_found and not self.edge_found
+                and not self.unresolved_call)
 
 
 def extract_relation_claims(answer: ClassifiedAnswer) -> list[RelationClaim]:
@@ -212,7 +222,14 @@ RETURN c.idx AS idx,
   COUNT {{
     MATCH (a:Symbol {{repo_id: $repo_id}})-[r]->(b:Symbol {{repo_id: $repo_id}})
     WHERE {_SUBJ} AND {_OBJ} AND type(r) = c.relation
-  }} AS edges
+  }} AS edges,
+  COUNT {{
+    MATCH (a:Symbol {{repo_id: $repo_id}})
+    WHERE {_SUBJ}
+    MATCH (f:File {{repo_id: $repo_id, rel_path: a.rel_path}})
+    WHERE any(w IN coalesce(f.waiting, [])
+              WHERE w = c.object_leaf OR w ENDS WITH ('.' + c.object_leaf))
+  }} AS unresolved
 """
 
 
@@ -236,6 +253,7 @@ def verify_relations(
                 "subject": c.subject,
                 "relation": c.relation,
                 "object": c.object,
+                "object_leaf": c.object.rsplit(".", 1)[-1],
             }
             for i, c in enumerate(claims)
         ],
@@ -252,6 +270,7 @@ def verify_relations(
                 subject_found=bool(row and row["subjects"]),
                 object_found=bool(row and row["objects"]),
                 edge_found=bool(row and row["edges"]),
+                unresolved_call=bool(row and row.get("unresolved")),
             )
         )
     return verdicts
